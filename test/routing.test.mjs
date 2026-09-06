@@ -1641,6 +1641,79 @@ test("router fails closed when an encrypted subagent payload cannot be relayed",
   }
 });
 
+test("router preserves relay 429 and suppresses repeated native attempts per account", async () => {
+  let nativeRequests = 0;
+  const native = await mockServer(async (request, response) => {
+    nativeRequests += 1;
+    await bodyJson(request);
+    json(response, 429, { error: { message: "native relay quota exhausted" } });
+  });
+  let gatewayRequests = 0;
+  const gateway = await mockServer(async (_request, response) => {
+    gatewayRequests += 1;
+    json(response, 200, { route: "external" });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS: "250",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  const relayRequest = (account) =>
+    fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CHATGPT_SESSION_TOKEN",
+        "ChatGPT-Account-Id": account,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "kimi-oauth/k3",
+        stream: false,
+        input: [
+          {
+            type: "agent_message",
+            content: [
+              { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
+              { type: "encrypted_content", encrypted_content: "gAAAAA-rate-limited=" },
+            ],
+          },
+        ],
+      }),
+    });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const first = await relayRequest("account-a");
+    assert.equal(first.status, 429);
+    const firstBody = await first.json();
+    assert.equal(firstBody.error.code, "ERR_NATIVE_AGENT_RELAY_RATE_LIMITED");
+    assert.doesNotMatch(JSON.stringify(firstBody), /native relay quota exhausted/u);
+    assert.equal(nativeRequests, 1);
+    assert.equal(gatewayRequests, 0);
+
+    const repeated = await relayRequest("account-a");
+    assert.equal(repeated.status, 429);
+    assert.equal(nativeRequests, 1, "same account and ciphertext should use the backoff cache");
+
+    const otherAccount = await relayRequest("account-b");
+    assert.equal(otherAccount.status, 429);
+    assert.equal(nativeRequests, 2, "relay failures must stay partitioned by native account");
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const afterBackoff = await relayRequest("account-a");
+    assert.equal(afterBackoff.status, 429);
+    assert.equal(nativeRequests, 3, "relay should retry native after the short backoff expires");
+    assert.equal(gatewayRequests, 0);
+  } finally {
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
 test("router sends standalone image requests only to the native OpenAI backend", async () => {
   const nativeRequests = [];
   const native = await mockServer(async (request, response) => {

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Native collaboration relay quota failures no longer turn into retry storms.**
+  When the native Codex relay needed to open a routed subagent payload receives
+  HTTP 429, the router now preserves that status instead of rewriting it to
+  502. The exact account-and-ciphertext refusal is remembered for a short,
+  bounded interval so immediate client retries fail locally without spending
+  another native relay request; other accounts and payloads remain isolated.
 - **Tok/s meter now excludes reasoning tokens and hides during generation.**
   `observedTokensPerSecond` used full `outputTokens` while TTFT waited for the
   first *visible* token. Providers often include `reasoning_tokens` (silent
