@@ -1,9 +1,17 @@
 import { existsSync, readFileSync } from "node:fs";
 import { NATIVE_CATALOG_PATH, CONFIG_PATH } from "./paths.mjs";
-import { nativeCatalogIsReusable, readModelsCache } from "./catalog.mjs";
+import { nativeCatalogIsReusable, readModelsCache, routedCatalogConfigured } from "./catalog.mjs";
 import { codexBinaryFingerprint, codexVersion } from "./codex-binary.mjs";
 import { refreshNativeAccountCatalog } from "./native-account-catalog.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
+import { routedCodexAgentStatus } from "./codex-agent-catalog.mjs";
+import {
+  applyMultiAgentCapabilities,
+  readMultiAgentSettings,
+  subagentEligibleModels,
+} from "./multi-agent-state.mjs";
+import { readHiddenModels } from "./model-picker-state.mjs";
+import { selectedConfiguredListedModels } from "./provider-selection.mjs";
 
 // Marker pattern from config-manager.mjs to detect managed Codex config
 const managedMarkerPattern = /^# BEGIN codex-router$/m;
@@ -20,6 +28,34 @@ function codexIntegrationInstalled() {
     // Fail closed: if config exists but cannot be read, assume not installed.
     // This is conservative for drift detection - missing a check is safer than
     // attempting republish when integration state is unknown.
+    return false;
+  }
+}
+
+/**
+ * Check whether the router-managed Codex agent definitions disagree with the
+ * current routed-model and subagent settings. Any uncertainty returns false:
+ * startup reconciliation must never turn an unreadable config into a write.
+ */
+export function routedAgentCatalogDriftDetected({
+  integrationInstalled = codexIntegrationInstalled,
+  readConfig = () => readFileSync(CONFIG_PATH, "utf8"),
+  selectedModels = selectedConfiguredListedModels,
+  readSettings = readMultiAgentSettings,
+  readHidden = readHiddenModels,
+  agentStatus = routedCodexAgentStatus,
+} = {}) {
+  if (!integrationInstalled()) return false;
+  try {
+    const contents = readConfig();
+    if (!routedCatalogConfigured(contents)) return false;
+    const settings = readSettings();
+    const hidden = readHidden();
+    const effective = applyMultiAgentCapabilities(selectedModels(), settings, { hidden });
+    const eligible = subagentEligibleModels(effective, settings);
+    return !agentStatus(eligible).ok;
+  } catch {
+    // Startup reconciliation must never turn an uncertain read into a write.
     return false;
   }
 }
@@ -74,14 +110,24 @@ export function nativeCatalogDriftDetected() {
 export async function republishOnNativeDrift({
   refreshAccountCatalog = refreshNativeAccountCatalog,
   refreshTargetPicker,
+  nativeDriftDetected = nativeCatalogDriftDetected,
+  routedAgentDriftDetected = routedAgentCatalogDriftDetected,
 } = {}) {
   // model_catalog_json stops Codex's own account cache writer. Refresh the
   // fixed ChatGPT account endpoint first; on any failure the updater leaves
   // the prior cache untouched and the local drift comparison remains safe.
   await refreshAccountCatalog();
-  if (!nativeCatalogDriftDetected()) {
+  const nativeDrift = nativeDriftDetected();
+  const routedAgentDrift = routedAgentDriftDetected();
+  if (!nativeDrift && !routedAgentDrift) {
     return false;
   }
+
+  const driftLabel = nativeDrift
+    ? routedAgentDrift
+      ? "Native catalog and routed agent drift"
+      : "Native catalog drift"
+    : "Routed agent drift";
 
   try {
     // Dynamic import to avoid startup dependency
@@ -89,13 +135,11 @@ export async function republishOnNativeDrift({
       await import("./target-integration.mjs")
     ).refreshTargetPickerIfInstalled;
     await refresh();
-    console.error(
-      "[codex-router] Native catalog drift detected and republished automatically."
-    );
+    console.error(`[codex-router] ${driftLabel} detected and republished automatically.`);
     return true;
   } catch (error) {
     console.error(
-      `[codex-router] Native catalog drift detected but republish failed: ${error.message}`
+      `[codex-router] ${driftLabel} detected but republish failed: ${error.message}`
     );
     return false;
   }
