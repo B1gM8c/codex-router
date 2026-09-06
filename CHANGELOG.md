@@ -11,6 +11,20 @@
   A native 401 is also preserved with a sanitized local error, allowing Codex's
   own ChatGPT authentication recovery to refresh the session and retry without
   exposing the upstream response body.
+- **The macOS tray no longer spawns a Node process every second to read
+  health.** `refreshActivity()` polls health once a second and ran
+  `bin/control health --json` each time, which boots Node and control.mjs's
+  whole module graph to make one loopback GET: about a second of CPU per call,
+  so an idle tray pegged a core for as long as it ran (measured 93.6% CPU,
+  1450 ms wall and 1000 ms CPU per poll, against 1.4 ms for the same GET over
+  plain HTTP). The tray now reads the protected health leaf directly with
+  `URLSession`, behind the same caller key and the same 3 s timeout. It decodes
+  every HTTP response, so a 503 still carries the degraded list and service
+  rows; transport failures throw and are recorded exactly as a failed
+  `control health` was. `control-health.mjs` remains the contract for the CLI
+  and the Control Center. The bounded one-second polls during MLX install,
+  runtime update, and vision-bridge pull still shell out and are unchanged.
+
 - **Tok/s meter now excludes reasoning tokens and hides during generation.**
   `observedTokensPerSecond` used full `outputTokens` while TTFT waited for the
   first *visible* token. Providers often include `reasoning_tokens` (silent
