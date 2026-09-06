@@ -2,12 +2,15 @@
 
 ## Unreleased
 
-- **Native collaboration relay quota failures no longer turn into retry storms.**
+- **Native collaboration relay auth and quota failures preserve their semantics.**
   When the native Codex relay needed to open a routed subagent payload receives
   HTTP 429, the router now preserves that status instead of rewriting it to
   502. The exact account-and-ciphertext refusal is remembered for a short,
   bounded interval so immediate client retries fail locally without spending
   another native relay request; other accounts and payloads remain isolated.
+  A native 401 is also preserved with a sanitized local error, allowing Codex's
+  own ChatGPT authentication recovery to refresh the session and retry without
+  exposing the upstream response body.
 - **Tok/s meter now excludes reasoning tokens and hides during generation.**
   `observedTokensPerSecond` used full `outputTokens` while TTFT waited for the
   first *visible* token. Providers often include `reasoning_tokens` (silent

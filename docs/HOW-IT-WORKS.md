@@ -365,10 +365,12 @@ backend can open its own opaque payload. In login-free mode the router fails
 closed instead of forwarding unreadable ciphertext to an external provider.
 A native relay `429` stays a `429` instead of becoming a gateway-style `502`,
 and the router remembers that exact account-and-ciphertext refusal for 60
-seconds so client retries do not repeatedly hit native quota. The short backoff
-stores only the already-hashed cache key and an expiry timestamp; other
-accounts and delegated payloads remain independent. Operators can tune the
-window with `CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS`.
+seconds so client retries do not repeatedly hit native quota. A native relay
+`401` likewise stays `401`, with the upstream body removed, so Codex's own
+ChatGPT authentication recovery can refresh the session and retry. The short
+429 backoff stores only the already-hashed cache key and an expiry timestamp;
+other accounts and delegated payloads remain independent. Operators can tune
+the window with `CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS`.
 
 Only registry-proven models are advertised as native v2 spawn-agent overrides.
 The Settings tab (desktop panel and macOS tray) exposes two local accordions:

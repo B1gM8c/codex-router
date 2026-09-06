@@ -1557,6 +1557,13 @@ function nativeAgentRelayRateLimitError() {
   return error;
 }
 
+function nativeAgentRelayUnauthorizedError() {
+  const error = new Error("Native collaboration payload relay requires refreshed authentication.");
+  error.status = 401;
+  error.code = "ERR_NATIVE_AGENT_RELAY_UNAUTHORIZED";
+  return error;
+}
+
 function purgeExpiredAgentRelayFailures(now = Date.now()) {
   for (const [key, expiresAt] of agentPayloadRelayFailures) {
     if (expiresAt <= now) agentPayloadRelayFailures.delete(key);
@@ -1704,6 +1711,9 @@ async function relayEncryptedAgentPayloadOnce(
     if (upstream.status === 429) {
       rememberAgentRelayFailure(cacheKey);
       throw nativeAgentRelayRateLimitError();
+    }
+    if (upstream.status === 401) {
+      throw nativeAgentRelayUnauthorizedError();
     }
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
