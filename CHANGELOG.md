@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Startup now repairs drifted routed-agent definitions.** The post-health
+  native-catalog reconciliation also compares Codex Router's managed agent
+  files with the current routed-model, visibility, and subagent settings. A
+  missing, stale, unprotected, or extra managed definition triggers the same
+  locked picker republish even when native model metadata itself is unchanged.
+  Foreign/unreadable Codex transport state remains write-free.
 - **The dashboard 24H chart now covers the exact rolling 24-hour window.** The
   hourly rollup added in #644 aligned bars to clock hours but began at the
   next whole hour after `now - 24h`, dropping up to almost one hour of valid
