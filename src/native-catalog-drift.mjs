@@ -13,8 +13,13 @@ import {
 import { readHiddenModels } from "./model-picker-state.mjs";
 import { selectedConfiguredListedModels } from "./provider-selection.mjs";
 
-// Marker pattern from config-manager.mjs to detect managed Codex config
-const managedMarkerPattern = /^# BEGIN codex-router$/m;
+// Marker prefix config-manager.mjs writes around router-owned Codex blocks.
+// Keep this compatibility surface aligned with target-integration.mjs.
+const managedMarkerPattern = /^# BEGIN (?:kimi-)?codex-(?:router|proxy)-/m;
+
+export function managedCodexConfigDetected(contents) {
+  return typeof contents === "string" && managedMarkerPattern.test(contents);
+}
 
 /**
  * Check if Codex integration is installed (has managed config).
@@ -23,7 +28,7 @@ const managedMarkerPattern = /^# BEGIN codex-router$/m;
 function codexIntegrationInstalled() {
   if (!existsSync(CONFIG_PATH)) return false;
   try {
-    return managedMarkerPattern.test(readFileSync(CONFIG_PATH, "utf8"));
+    return managedCodexConfigDetected(readFileSync(CONFIG_PATH, "utf8"));
   } catch {
     // Fail closed: if config exists but cannot be read, assume not installed.
     // This is conservative for drift detection - missing a check is safer than

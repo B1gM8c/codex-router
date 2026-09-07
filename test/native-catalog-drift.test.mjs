@@ -30,7 +30,7 @@ test("drift detection triggers republish with new arbitrary native in merged out
     const { NATIVE_CATALOG_PATH, MERGED_CATALOG_PATH, CONFIG_PATH } = await import("../src/paths.mjs");
 
     // Create minimal managed config so codexIntegrationInstalled returns true
-    writeFileSync(CONFIG_PATH, "# BEGIN codex-router\nopenai_base_url = \"http://test\"\n# END codex-router\n");
+    writeFileSync(CONFIG_PATH, "# BEGIN codex-router-managed\nopenai_base_url = \"http://test\"\n# END codex-router-managed\n");
 
     // Simulate OLD native model in models_cache.json
     const oldNative = {
@@ -157,6 +157,15 @@ test("drift detection triggers republish with new arbitrary native in merged out
     
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("managed Codex marker detection matches config-manager blocks", async () => {
+  const { managedCodexConfigDetected } = await import("../src/native-catalog-drift.mjs");
+
+  assert.equal(managedCodexConfigDetected("# BEGIN codex-router-managed\n"), true);
+  assert.equal(managedCodexConfigDetected("# BEGIN codex-router-provider-managed\n"), true);
+  assert.equal(managedCodexConfigDetected("# BEGIN kimi-codex-proxy-managed\n"), true);
+  assert.equal(managedCodexConfigDetected("# BEGIN something-else\n"), false);
 });
 
 test("startup drift detection repairs missing routed agents without native model drift", async () => {
