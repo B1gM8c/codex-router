@@ -584,12 +584,19 @@ export function hourlyUsageRollup({
   readEvents = recentUsageEvents,
 } = {}) {
   const span = Math.max(1, Math.min(24 * 31, Math.floor(hours) || 0));
-  // Bucket edges are local hour boundaries, matching the labels the chart
-  // formats from each bucket's own start.
-  const anchor = new Date(now);
-  anchor.setMinutes(0, 0, 0);
-  const first = anchor.getTime() - (span - 1) * HOUR_MS;
-  const buckets = Array.from({ length: span }, (_, index) => ({
+  // Keep clock-hour labels, but cover the exact rolling window. When `now`
+  // sits between hour boundaries, the window touches both an oldest partial
+  // hour and the current partial hour, so it can span `hours + 1` clock buckets.
+  const windowStart = now - span * HOUR_MS;
+  const firstAnchor = new Date(windowStart);
+  firstAnchor.setMinutes(0, 0, 0);
+  const lastAnchor = new Date(now);
+  lastAnchor.setMinutes(0, 0, 0);
+  const first = firstAnchor.getTime();
+  const lastHour = lastAnchor.getTime();
+  const lastBucket = now === lastHour ? lastHour - HOUR_MS : lastHour;
+  const bucketCount = Math.floor((lastBucket - first) / HOUR_MS) + 1;
+  const buckets = Array.from({ length: bucketCount }, (_, index) => ({
     startedAt: new Date(first + index * HOUR_MS).toISOString(),
     tokens: 0,
     requests: 0,
@@ -601,12 +608,12 @@ export function hourlyUsageRollup({
   }));
   // Reading the whole window is the point: the cap this replaces is the defect.
   const events = readEvents({
-    sinceMs: Math.max(HOUR_MS, Date.now() - first),
+    sinceMs: Math.max(HOUR_MS, now - first),
     limit: Number.POSITIVE_INFINITY,
   });
   for (const event of events) {
     const at = Date.parse(event?.at);
-    if (!Number.isFinite(at)) continue;
+    if (!Number.isFinite(at) || at < windowStart || at >= now) continue;
     const index = Math.floor((at - first) / HOUR_MS);
     if (index < 0 || index >= buckets.length) continue;
     const bucket = buckets[index];

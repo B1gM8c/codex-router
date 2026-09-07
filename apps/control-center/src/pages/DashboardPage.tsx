@@ -1161,16 +1161,22 @@ function buildHourlyTrafficBuckets(
   now: number,
 ): TrafficBucket[] {
   if (hours?.length) return hourlyBucketsFromRollup(hours);
-  const anchor = new Date(now);
-  anchor.setMinutes(0, 0, 0);
-  const first = anchor.getTime() - (23 * HOUR_MS);
+  const windowStart = now - 24 * HOUR_MS;
+  const firstAnchor = new Date(windowStart);
+  firstAnchor.setMinutes(0, 0, 0);
+  const lastAnchor = new Date(now);
+  lastAnchor.setMinutes(0, 0, 0);
+  const first = firstAnchor.getTime();
+  const lastHour = lastAnchor.getTime();
+  const lastBucket = now === lastHour ? lastHour - HOUR_MS : lastHour;
+  const bucketCount = Math.floor((lastBucket - first) / HOUR_MS) + 1;
   const formatter = new Intl.DateTimeFormat("en-US", { hour: "numeric" });
   const fullFormatter = new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
   });
-  const buckets = Array.from({ length: 24 }, (_, index) => {
+  const buckets = Array.from({ length: bucketCount }, (_, index) => {
     const start = new Date(first + index * HOUR_MS);
     return {
       key: start.toISOString(),
@@ -1187,7 +1193,7 @@ function buildHourlyTrafficBuckets(
   });
   for (const event of events ?? []) {
     const at = Date.parse(event.at);
-    if (!Number.isFinite(at) || at < first || at >= anchor.getTime() + HOUR_MS) continue;
+    if (!Number.isFinite(at) || at < windowStart || at >= now) continue;
     const index = Math.floor((at - first) / HOUR_MS);
     if (index < 0 || index >= buckets.length) continue;
     const bucket = buckets[index];

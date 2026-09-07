@@ -7,6 +7,17 @@
   left an object `tool_choice` at the client's original spelling, so a forced long tool
   could still be rejected as unknown. Forced choices for both Command Code variants now
   pass through the same reversible namespace alias map as the advertised tools.
+- **Startup now repairs drifted routed-agent definitions.** The post-health
+  native-catalog reconciliation also compares Codex Router's managed agent
+  files with the current routed-model, visibility, and subagent settings. A
+  missing, stale, unprotected, or extra managed definition triggers the same
+  locked picker republish even when native model metadata itself is unchanged.
+  Foreign/unreadable Codex transport state remains write-free.
+- **The dashboard 24H chart now covers the exact rolling 24-hour window.** The
+  hourly rollup added in #644 aligned bars to clock hours but began at the
+  next whole hour after `now - 24h`, dropping up to almost one hour of valid
+  traffic. The router and legacy renderer fallback now retain both partial edge
+  hours while filtering events to the exact half-open `[now - 24h, now)` window.
 - **Command Code no longer rejects a routed turn over a long tool name or a
   recursive schema.** A Codex turn carrying a client tool such as
   `mcp__openai_api_key_local_confirmation__confirm_openai_api_key_local_destination`
