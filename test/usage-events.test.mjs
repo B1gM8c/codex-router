@@ -440,7 +440,7 @@ test("the aging benchmark classifies shaped-only turns as compacted", () => {
 
 test("the hourly rollup aggregates the whole window, not a capped sample", async () => {
   const { hourlyUsageRollup } = await import("../src/usage-events.mjs");
-  const now = Date.parse("2026-09-06T17:30:00.000Z");
+  const now = Date.parse("2026-09-06T17:30:37.000Z");
   const hour = 3_600_000;
   // 4,000 rows across the window: many more than recentUsageEvents' 1,000-row
   // default, and the reason the chart could not be built from that sample.
@@ -458,20 +458,41 @@ test("the hourly rollup aggregates the whole window, not a capped sample", async
 
   assert.equal(seen.length, 1);
   assert.equal(seen[0].limit, Number.POSITIVE_INFINITY);
-  assert.equal(buckets.length, 24);
+  assert.equal(buckets.length, 25);
   assert.equal(buckets.reduce((sum, bucket) => sum + bucket.requests, 0), 4_000);
   assert.equal(buckets.reduce((sum, bucket) => sum + bucket.tokens, 0), 400_000);
-  assert.ok(buckets.every((bucket) => bucket.requests > 0), "every hour should be filled");
+  assert.equal(buckets.filter((bucket) => bucket.requests > 0).length, 24);
+  assert.ok(seen[0].sinceMs >= 24 * hour && seen[0].sinceMs < 25 * hour);
   assert.deepEqual(
     buckets.map((bucket) => bucket.startedAt).slice().sort(),
     buckets.map((bucket) => bucket.startedAt),
   );
 });
 
+test("the hourly rollup keeps the oldest partial hour inside the rolling window", async () => {
+  const { hourlyUsageRollup } = await import("../src/usage-events.mjs");
+  const now = Date.parse("2026-09-06T17:30:37.000Z");
+  const hour = 3_600_000;
+  const buckets = hourlyUsageRollup({
+    now,
+    readEvents: () => [
+      { at: new Date(now - 24 * hour).toISOString(), model: "m", provider: "p", totalTokens: 20 },
+      { at: new Date(now - (23 * hour + 45 * 60_000)).toISOString(), model: "m", provider: "p", totalTokens: 10 },
+      { at: new Date(now - (24 * hour + 15 * 60_000)).toISOString(), model: "m", provider: "p", totalTokens: 1000 },
+      { at: new Date(now).toISOString(), model: "m", provider: "p", totalTokens: 1000 },
+    ],
+  });
+
+  assert.equal(buckets.length, 25);
+  assert.equal(buckets.reduce((sum, bucket) => sum + bucket.requests, 0), 2);
+  assert.equal(buckets.reduce((sum, bucket) => sum + bucket.tokens, 0), 30);
+  assert.equal(buckets[0].requests, 2, "the oldest partial clock hour is retained");
+});
+
 test("the hourly rollup mirrors the renderer's billed-token and cache-share math", async () => {
   const { hourlyUsageRollup } = await import("../src/usage-events.mjs");
-  const now = Date.parse("2026-09-06T17:30:00.000Z");
-  const at = new Date(now - 60_000).toISOString();
+  const now = Date.parse("2026-09-06T17:30:37.000Z");
+  const at = new Date(now - 1_000).toISOString();
   const buckets = hourlyUsageRollup({
     now,
     readEvents: () => [
@@ -498,10 +519,10 @@ test("the hourly rollup mirrors the renderer's billed-token and cache-share math
 test("an empty ledger still returns a full, honest set of hours", async () => {
   const { hourlyUsageRollup } = await import("../src/usage-events.mjs");
   const buckets = hourlyUsageRollup({
-    now: Date.parse("2026-09-06T17:30:00.000Z"),
+    now: Date.parse("2026-09-06T17:30:37.000Z"),
     readEvents: () => [],
   });
-  assert.equal(buckets.length, 24);
+  assert.equal(buckets.length, 25);
   assert.ok(buckets.every((bucket) => bucket.requests === 0 && bucket.tokens === 0));
   assert.ok(buckets.every((bucket) => !bucket.measuredTokens && !bucket.measuredBreakdown));
 });
