@@ -37,8 +37,8 @@ struct DailyUsageFallbackTests {
     ])
   }
 
-  @Test("widget projection never publishes local fallback as account usage")
-  func widgetProjectionExcludesFallbackTokens() {
+  @Test("widget projection labels local fallback instead of publishing it as zero")
+  func widgetProjectionCarriesFallbackProvenance() {
     let accountDate = Date(timeIntervalSince1970: 1_777_500_000)
     let fallbackDate = accountDate.addingTimeInterval(86_400)
     let projected = routerWidgetDailyPoints([
@@ -48,8 +48,54 @@ struct DailyUsageFallbackTests {
 
     #expect(projected == [
       RouterWidgetDailyPoint(date: accountDate, tokens: 280),
-      RouterWidgetDailyPoint(date: fallbackDate, tokens: 0),
+      RouterWidgetDailyPoint(date: fallbackDate, tokens: 27_000, isRouterFallback: true),
     ])
+  }
+
+  @Test("a fallback point survives one encode and decode without its flag defaulting away")
+  func fallbackProvenanceSurvivesTheSnapshotFile() throws {
+    let date = Date(timeIntervalSince1970: 1_777_500_000)
+    let points = [
+      RouterWidgetDailyPoint(date: date, tokens: 280),
+      RouterWidgetDailyPoint(date: date.addingTimeInterval(86_400), tokens: 27_000, isRouterFallback: true),
+    ]
+    let encoded = try JSONEncoder.routerWidget.encode(points)
+    #expect(try JSONDecoder.routerWidget.decode([RouterWidgetDailyPoint].self, from: encoded) == points)
+
+    // Account points stay byte-identical to a schema-1 snapshot written before
+    // provenance existed, so an extension on either side of an app update can
+    // still read the host's file.
+    let text = String(decoding: encoded, as: UTF8.self)
+    #expect(text.components(separatedBy: "isRouterFallback").count - 1 == 1)
+  }
+
+  @Test("a snapshot written before provenance existed decodes as account data")
+  func legacyPointsDecodeWithoutTheFlag() throws {
+    let legacy = Data(#"[{"date":"2026-04-29T18:00:00Z","tokens":280}]"#.utf8)
+    let decoded = try JSONDecoder.routerWidget.decode([RouterWidgetDailyPoint].self, from: legacy)
+
+    #expect(decoded.count == 1)
+    #expect(decoded[0].tokens == 280)
+    #expect(decoded[0].isRouterFallback == false)
+  }
+
+  @Test("a usage source reports which of its days came from router telemetry")
+  func usageSourceSummarizesFallbackDays() {
+    let date = Date(timeIntervalSince1970: 1_777_500_000)
+    let source = RouterWidgetUsageSource(
+      id: "openai",
+      name: "Codex",
+      todayTokens: 27_000,
+      daily: [
+        RouterWidgetDailyPoint(date: date, tokens: 280),
+        RouterWidgetDailyPoint(date: date.addingTimeInterval(86_400), tokens: 0, isRouterFallback: true),
+        RouterWidgetDailyPoint(date: date.addingTimeInterval(172_800), tokens: 27_000, isRouterFallback: true),
+      ]
+    )
+
+    #expect(source.todayIsRouterFallback)
+    #expect(source.cumulativeDaily.map(\.tokens) == [280, 280, 27_280])
+    #expect(source.cumulativeDaily.map(\.isRouterFallback) == [false, true, true])
   }
 
   @Test("dailyUsagePoints fills missing days and preserves fallback flags")
