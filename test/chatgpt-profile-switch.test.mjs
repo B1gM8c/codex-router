@@ -2050,6 +2050,20 @@ test("the active account reads usage from the live primary home, not its frozen 
     path.dirname(chatGPTSubscriptionAccountAuthPath(account.id, { homesDir })),
   );
 
+  // An active marker is a claim about the pool, not proof about CODEX_HOME:
+  // `codex login` writes that file directly. A primary home holding someone
+  // else must not be read as the selected account's usage.
+  writeSwitch({ desired: account.id, active: account.id, pending: false, phase: "idle" });
+  writeFileSync(path.join(primaryHome, "auth.json"), JSON.stringify({
+    tokens: { access_token: "someone-else", account_id: "different-account" },
+  }), { mode: 0o600 });
+  const mismatched = selectedChatGPTUsageProfile({ filePath, homesDir, primaryHome, switchPath });
+  assert.equal(
+    mismatched.home,
+    path.dirname(chatGPTSubscriptionAccountAuthPath(account.id, { homesDir })),
+  );
+  writeFileSync(path.join(primaryHome, "auth.json"), auth, { mode: 0o600 });
+
   // An unselected account is never in the primary home at all.
   writeSwitch({ desired: other.id, active: other.id, pending: false, phase: "idle" });
   const inactive = selectedChatGPTUsageProfile({ filePath, homesDir, primaryHome, switchPath });

@@ -1481,7 +1481,16 @@ export function selectedChatGPTUsageProfile({
   // buckets that failure produces render as a legitimate-looking zero across
   // the tray, the Usage page, and the desktop widget. The active selection's
   // live credentials are the primary home, so read those instead of the copy.
-  const home = profile.active === selection && !pending
+  // Reading the primary home is only correct while it actually holds the
+  // selected account. `codex login` writes CODEX_HOME directly, without going
+  // through the switch, so an active marker is a claim about this pool rather
+  // than proof about that file. Verify the identity before trusting it, and
+  // fall back to the account's own copy when it does not match -- reporting one
+  // account's usage under another's name is a worse failure than a stale read.
+  const boundAccountId = account.identity?.accountId;
+  const primaryHoldsSelection = Boolean(boundAccountId)
+    && authIdentity(primaryAuthPath(primaryHome))?.accountId === boundAccountId;
+  const home = profile.active === selection && !pending && primaryHoldsSelection
     ? primaryHome
     : path.dirname(chatGPTSubscriptionAccountAuthPath(selection, { homesDir }));
   return {
