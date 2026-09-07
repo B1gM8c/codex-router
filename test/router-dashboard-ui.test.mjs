@@ -54,6 +54,9 @@ test("the hourly traffic chart reads the router rollup instead of the capped eve
   assert.match(page, /function hourlyBucketsFromRollup/);
   assert.match(page, /buildTrafficBuckets\(events, providerUsage, eventHours, trafficRange/);
   assert.match(page, /target\?\.usageEventHours/);
+  assert.match(hourly, /const windowStart = now - 24 \* HOUR_MS/);
+  assert.match(hourly, /Array\.from\(\{ length: bucketCount \}/);
+  assert.match(hourly, /at < windowStart \|\| at >= now/);
 
   const control = (await readFile(new URL("../src/control.mjs", import.meta.url), "utf8"))
     .replace(/\r\n/g, "\n");
