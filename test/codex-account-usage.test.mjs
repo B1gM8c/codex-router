@@ -286,3 +286,47 @@ test("a refused usage read still returns rate limits instead of failing the pane
   assert.deepEqual(value.dailyUsageBuckets, []);
   assert.equal(value.summary.lifetimeTokens, null);
 });
+
+test("a rateLimits read that never answers still returns the usage that did", async () => {
+  const value = await readCodexAccountUsage({
+    binary: "/fake/codex",
+    platform: "darwin",
+    timeoutMs: 300,
+    spawnImpl: () => fakeAppServer((message) => {
+      if (message.id === 1) return { id: 1, result: {} };
+      // Silence, not a refusal. Observed in the field: account/rateLimits/read
+      // hung past 20 seconds while account/usage/read answered immediately, and
+      // requiring both discarded a full daily ledger -- which every surface then
+      // published as a confident zero.
+      if (message.id === 2) return undefined;
+      if (message.id === 3) {
+        return {
+          id: 3,
+          result: {
+            summary: { lifetimeTokens: 50_316_410_695, peakDailyTokens: 3_138_996_331, currentStreakDays: 2 },
+            dailyUsageBuckets: [{ startDate: "2026-09-06", tokens: 557_115_160 }],
+          },
+        };
+      }
+      return undefined;
+    }),
+  });
+
+  assert.deepEqual(value.dailyUsageBuckets, [{ startDate: "2026-09-06", tokens: 557_115_160 }]);
+  assert.equal(value.summary.lifetimeTokens, 50_316_410_695);
+  // The half that never answered stays absent rather than becoming a zero.
+  assert.equal(value.planType, null);
+  assert.equal(value.primary, null);
+});
+
+test("a window that produced no answer at all is still a failure", async () => {
+  await assert.rejects(
+    readCodexAccountUsage({
+      binary: "/fake/codex",
+      platform: "darwin",
+      timeoutMs: 300,
+      spawnImpl: () => fakeAppServer((message) => (message.id === 1 ? { id: 1, result: {} } : undefined)),
+    }),
+    /timed out/,
+  );
+});
