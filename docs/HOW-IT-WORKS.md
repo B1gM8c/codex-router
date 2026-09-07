@@ -372,6 +372,13 @@ ChatGPT authentication recovery can refresh the session and retry. The short
 other accounts and delegated payloads remain independent. Operators can tune
 the window with `CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS`.
 
+At service startup, the post-health reconciliation checks both native model
+metadata and the router-managed Codex agent definitions. If the native catalog
+is current but a routed `router-model-*.toml` definition is missing, stale,
+unprotected, or left over for a model that is no longer eligible, the installed
+picker is republished to restore the coupled catalog/agent state. An unreadable
+or foreign Codex transport is never repaired speculatively.
+
 Only registry-proven models are advertised as native v2 spawn-agent overrides.
 The Settings tab (desktop panel and macOS tray) exposes two local accordions:
 **Subagent models** can withhold or re-enable proven models, while **Model

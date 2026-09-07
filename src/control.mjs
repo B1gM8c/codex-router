@@ -314,8 +314,20 @@ async function emitProbe() {
   const hiddenModels = new Set(picker.hidden);
   const visibleModels = new Set(picker.visible);
   const subagentSettings = subagentSettingsSnapshot();
-  const usageEvents = TARGET === "codex"
-    ? (await import("./usage-events.mjs")).recentUsageEvents()
+  const usageEventsModule = TARGET === "codex" ? await import("./usage-events.mjs") : undefined;
+  // The tray polls this probe constantly and the ledger is large, so read the
+  // window once and derive both views from it. The recent-activity list still
+  // gets the same bounded tail it always got; the hourly rollup needs the whole
+  // window, because a capped sample cannot answer "how much traffic did this
+  // router carry today" -- on a busy day 1,000 events is under two hours.
+  const windowEvents = usageEventsModule
+    ? usageEventsModule.recentUsageEvents({ limit: Number.POSITIVE_INFINITY })
+    : [];
+  const usageEvents = usageEventsModule
+    ? windowEvents.slice(-usageEventsModule.RECENT_USAGE_EVENT_LIMIT)
+    : [];
+  const usageEventHours = usageEventsModule
+    ? usageEventsModule.hourlyUsageRollup({ readEvents: () => windowEvents })
     : [];
   // Local proof records are surfaced for status only. They never alter the
   // registry capability sent to Codex.
@@ -398,6 +410,7 @@ async function emitProbe() {
       ...(TARGET === "codex"
         ? {
             usageEvents,
+            usageEventHours,
             nativeAliases: readNativeAliases(),
             modelSettings: {
               subagents: subagentSettings,
