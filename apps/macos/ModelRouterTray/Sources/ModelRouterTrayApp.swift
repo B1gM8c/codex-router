@@ -2358,7 +2358,7 @@ final class RouterStore: ObservableObject {
         )
       } ?? []
     }
-    let calendar = Calendar.current
+    let calendar = usageDayCalendar
     return dailyUsagePoints(
       from: buckets,
       days: days,
@@ -2373,7 +2373,7 @@ final class RouterStore: ObservableObject {
 
   func localUsageTotals(for providerID: String, days: Int) -> (tokens: Double, requests: Int) {
     guard providerID != "openai", let usage = providerUsage(for: providerID) else { return (0, 0) }
-    let calendar = Calendar.current
+    let calendar = usageDayCalendar
     return sumLocalUsageTotals(
       from: usage.dailyUsageBuckets,
       days: days,
@@ -4521,13 +4521,42 @@ struct DailyUsageDisplayBucket: Equatable {
   let isRouterFallback: Bool
 }
 
+// Usage days are UTC days. OpenAI's account stream reports dailyUsageBuckets on
+// UTC calendar boundaries and the router keys its own buckets the same way, so
+// this formatter has to read and write that one day space. Leaving it on the
+// device zone made every key mean "the local day of the same name", which east
+// of UTC is a different window than the bucket measured -- and left the current
+// local day with no account bucket to match until the offset elapsed, so an
+// account mid-session reported "today: 0" every morning.
+let usageDayTimeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+
 let dailyUsageDayKeyFormatter: DateFormatter = {
   let formatter = DateFormatter()
   formatter.locale = Locale(identifier: "en_US_POSIX")
   formatter.calendar = Calendar(identifier: .gregorian)
+  formatter.timeZone = usageDayTimeZone
   formatter.dateFormat = "yyyy-MM-dd"
   return formatter
 }()
+
+/// The calendar every usage-day walk and label must use, so a point's date, the
+/// key it looks up, and the day it is labelled with all name the same window.
+var usageDayCalendar: Calendar = {
+  var calendar = Calendar(identifier: .gregorian)
+  calendar.timeZone = usageDayTimeZone
+  return calendar
+}()
+
+/// Day labels for a usage chart. A usage point's date is the start of a UTC
+/// day, so formatting it in the device zone can name the day before or after
+/// the one the bucket measured. Label the day the number is actually from.
+extension Date {
+  func usageDayLabel(_ style: Date.FormatStyle) -> String {
+    var dayStyle = style
+    dayStyle.timeZone = usageDayTimeZone
+    return formatted(dayStyle)
+  }
+}
 
 func mergeAccountUsageBuckets(
   account: [CodexDailyUsageBucket],
@@ -4556,7 +4585,7 @@ func dailyUsagePoints(
   from buckets: [DailyUsageDisplayBucket],
   days: Int,
   today: Date,
-  calendar: Calendar = .current
+  calendar: Calendar = usageDayCalendar
 ) -> [DailyUsagePoint] {
   let indexed = Dictionary(uniqueKeysWithValues: buckets.map { ($0.startDate, $0) })
   return (0..<days).map { offset in
@@ -4571,11 +4600,14 @@ func dailyUsagePoints(
 }
 
 /// Pure 7/30-day total. Safe to call from SwiftUI view bodies.
+/// The window boundaries have to be UTC days like the keys they are compared
+/// against; a local window against UTC-parsed keys drops or admits one day at
+/// the edge, by the machine's offset.
 func sumLocalUsageTotals(
   from buckets: [ProviderDailyUsageBucket],
   days: Int,
   today: Date,
-  calendar: Calendar = .current
+  calendar: Calendar = usageDayCalendar
 ) -> (tokens: Double, requests: Int) {
   let firstDay = calendar.date(byAdding: .day, value: -(days - 1), to: today) ?? today
   return buckets.reduce(into: (tokens: 0.0, requests: 0)) { totals, bucket in
@@ -10146,13 +10178,13 @@ struct UsageBarChart: View {
 
   private func axisLabel(for point: DailyUsagePoint) -> String {
     if points.count <= 7 {
-      return point.date.formatted(.dateTime.weekday(.abbreviated))
+      return point.date.usageDayLabel(.dateTime.weekday(.abbreviated))
     }
-    return point.date.formatted(.dateTime.month(.defaultDigits).day())
+    return point.date.usageDayLabel(.dateTime.month(.defaultDigits).day())
   }
 
   private func hoverText(for point: DailyUsagePoint) -> String {
-    let date = point.date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+    let date = point.date.usageDayLabel(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
     let tokens = self.tokenDisplayUnit.format(point.tokens)
     let text = RouterLanguage.isSimplifiedChinese ? "\(date) · \(tokens) token" : "\(date) · \(tokens) tokens"
     guard point.isRouterFallback else { return text }

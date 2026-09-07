@@ -3,11 +3,19 @@ import { providerAccountUsageSnapshot } from "./provider-account-usage.mjs";
 import { canonicalProviderId, readProviderSelection } from "./provider-selection.mjs";
 import { allUsageEvents } from "./usage-events.mjs";
 
+// OpenAI's account stream reports dailyUsageBuckets keyed by UTC calendar day.
+// These router-derived buckets were keyed by the machine's local day, so the
+// two day spaces were merged by string in mergeAccountUsageBuckets() and drawn
+// on one chart as if they described the same window. East of UTC that silently
+// misattributed every bar by the zone's offset, and the current local day had
+// no account bucket to match at all until the offset elapsed -- a Pro account
+// mid-session showed "today: 0" every morning. One day space, and it has to be
+// the one the authoritative stream already uses.
 function dateKey(value) {
   const date = new Date(value);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
