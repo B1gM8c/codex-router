@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Command Code forced tool choices now use the same bounded alias as the tool definition.**
+  The 64-character compatibility added in #643 shortened provider-facing tool names but
+  left an object `tool_choice` at the client's original spelling, so a forced long tool
+  could still be rejected as unknown. Forced choices for both Command Code variants now
+  pass through the same reversible namespace alias map as the advertised tools.
 - **Command Code no longer rejects a routed turn over a long tool name or a
   recursive schema.** A Codex turn carrying a client tool such as
   `mcp__openai_api_key_local_confirmation__confirm_openai_api_key_local_destination`
