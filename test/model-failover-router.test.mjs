@@ -492,6 +492,7 @@ test("a marked provider transport failure moves a subagent to a checked-in v2 ro
 
     assert.deepEqual(seen.map((body) => body.model), [
       V2_PRIMARY.gatewayModel,
+      V2_PRIMARY.gatewayModel,
       V2_FALLBACK.gatewayModel,
     ]);
     assert.equal(result.status, 200);
@@ -528,9 +529,76 @@ test("subagent transport failover preserves search history execution mode", asyn
       { headers: { "x-openai-subagent": "review-child" } },
     );
 
-    assert.deepEqual(seen.map((body) => body.model), [V2_THIRD.gatewayModel]);
+    assert.deepEqual(seen.map((body) => body.model), [
+      V2_THIRD.gatewayModel,
+      V2_THIRD.gatewayModel,
+    ]);
     assert.equal(result.status, 502);
     assert.match(child.testErrors(), /reason=transport -> none outcome=no-candidate/);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+test("a marked provider transport failure retries the same ordinary route once", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    const body = await bodyJson(request);
+    seen.push(body);
+    if (seen.length === 1) {
+      response.writeHead(502, { "Content-Type": "application/json" });
+      response.end(TRANSPORT_BODY);
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(contentSse("same-route-transport-retry"));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), {
+    chain: [V2_FALLBACK.slug],
+    v2Credentials: true,
+  });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const result = await readRouted(routerPort, { ...TURN_BODY, model: V2_PRIMARY.slug });
+
+    assert.deepEqual(seen.map((body) => body.model), [
+      V2_PRIMARY.gatewayModel,
+      V2_PRIMARY.gatewayModel,
+    ]);
+    assert.equal(result.status, 200);
+    assert.match(result.body, /answered-by-same-route-transport-retry/);
+    assert.match(child.testErrors(), /routed transport retry 1\/1/);
+    const [event] = await waitForUsageEvents(child.stateDir, 1, child);
+    assert.equal(event.model, V2_PRIMARY.slug);
+    assert.equal(event.status, 200);
+    assert.equal(event.retries, 1);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+test("an unmarked provider 502 is never retried", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    seen.push(await bodyJson(request));
+    response.writeHead(502, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "provider unavailable" } }));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), {
+    chain: [V2_FALLBACK.slug],
+    v2Credentials: true,
+  });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const result = await readRouted(routerPort, { ...TURN_BODY, model: V2_PRIMARY.slug });
+
+    assert.deepEqual(seen.map((body) => body.model), [V2_PRIMARY.gatewayModel]);
+    assert.equal(result.status, 502);
+    assert.doesNotMatch(child.testErrors(), /routed transport retry/);
   } finally {
     await stopChild(child);
     await closeServer(gw.server);
@@ -553,7 +621,10 @@ test("a marked provider transport failure does not move an ordinary turn", async
     await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
     const result = await readRouted(routerPort, { ...TURN_BODY, model: V2_PRIMARY.slug });
 
-    assert.deepEqual(seen.map((body) => body.model), [V2_PRIMARY.gatewayModel]);
+    assert.deepEqual(seen.map((body) => body.model), [
+      V2_PRIMARY.gatewayModel,
+      V2_PRIMARY.gatewayModel,
+    ]);
     assert.equal(result.status, 502);
     assert.match(child.testErrors(), /reason=transport -> none outcome=no-candidate/);
   } finally {
@@ -582,7 +653,10 @@ test("a subagent header cannot grant fallback authority to an unverified route",
       { headers: { "x-openai-subagent": "caller-claimed-child" } },
     );
 
-    assert.deepEqual(seen.map((body) => body.model), [PRIMARY.gatewayModel]);
+    assert.deepEqual(seen.map((body) => body.model), [
+      PRIMARY.gatewayModel,
+      PRIMARY.gatewayModel,
+    ]);
     assert.equal(result.status, 502);
     assert.match(child.testErrors(), /reason=transport -> none outcome=no-candidate/);
   } finally {
@@ -623,6 +697,7 @@ test("subagent transport failover stops on the first application response", asyn
     );
 
     assert.deepEqual(seen.map((body) => body.model), [
+      V2_PRIMARY.gatewayModel,
       V2_PRIMARY.gatewayModel,
       V2_FALLBACK.gatewayModel,
     ]);
