@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **OpenCode Go Muse Responses routes can continue after a completed web search.**
+  Live replay probes for Muse Spark 1.2 and 1.3 Contributor confirmed that the
+  Responses upstream accepts completed `web_search_call` history even though
+  neither route advertises a new search tool. Both exact routes now declare
+  `supportsSearchHistory: true`, so follow-up and compact turns preserve that
+  verified history instead of failing locally with `model_search_not_supported`
+  (issue #639).
 - **Startup now repairs drifted routed-agent definitions.** The post-health
   native-catalog reconciliation also compares Codex Router's managed agent
   files with the current routed-model, visibility, and subagent settings. A
