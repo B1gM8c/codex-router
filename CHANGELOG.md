@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Startup now repairs drifted routed-agent definitions.** The post-health
+  native-catalog reconciliation also compares Codex Router's managed agent
+  files with the current routed-model, visibility, and subagent settings. A
+  missing, stale, unprotected, or extra managed definition triggers the same
+  locked picker republish even when native model metadata itself is unchanged.
+  Foreign/unreadable Codex transport state remains write-free.
 - **Command Code no longer rejects a routed turn over a long tool name or a
   recursive schema.** A Codex turn carrying a client tool such as
   `mcp__openai_api_key_local_confirmation__confirm_openai_api_key_local_destination`
