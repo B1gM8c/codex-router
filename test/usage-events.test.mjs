@@ -437,3 +437,71 @@ test("the aging benchmark classifies shaped-only turns as compacted", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("the hourly rollup aggregates the whole window, not a capped sample", async () => {
+  const { hourlyUsageRollup } = await import("../src/usage-events.mjs");
+  const now = Date.parse("2026-09-06T17:30:00.000Z");
+  const hour = 3_600_000;
+  // 4,000 rows across the window: many more than recentUsageEvents' 1,000-row
+  // default, and the reason the chart could not be built from that sample.
+  const events = Array.from({ length: 4_000 }, (_, index) => ({
+    at: new Date(now - (index % 24) * hour - 60_000).toISOString(),
+    model: "m",
+    provider: "openai",
+    totalTokens: 100,
+  }));
+  const seen = [];
+  const buckets = hourlyUsageRollup({
+    now,
+    readEvents: (options) => { seen.push(options); return events; },
+  });
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].limit, Number.POSITIVE_INFINITY);
+  assert.equal(buckets.length, 24);
+  assert.equal(buckets.reduce((sum, bucket) => sum + bucket.requests, 0), 4_000);
+  assert.equal(buckets.reduce((sum, bucket) => sum + bucket.tokens, 0), 400_000);
+  assert.ok(buckets.every((bucket) => bucket.requests > 0), "every hour should be filled");
+  assert.deepEqual(
+    buckets.map((bucket) => bucket.startedAt).slice().sort(),
+    buckets.map((bucket) => bucket.startedAt),
+  );
+});
+
+test("the hourly rollup mirrors the renderer's billed-token and cache-share math", async () => {
+  const { hourlyUsageRollup } = await import("../src/usage-events.mjs");
+  const now = Date.parse("2026-09-06T17:30:00.000Z");
+  const at = new Date(now - 60_000).toISOString();
+  const buckets = hourlyUsageRollup({
+    now,
+    readEvents: () => [
+      // Billed counts win over raw ones, and a cached share larger than the
+      // input it belongs to is clamped rather than double counted.
+      { at, model: "m", provider: "p", inputTokens: 10, billedInputTokens: 40, cachedInputTokens: 90, outputTokens: 3, billedOutputTokens: 7 },
+      // No totalTokens: the sum falls back to billed input plus billed output.
+      { at, model: "m", provider: "p", inputTokens: 5, outputTokens: 5 },
+      // A request with no token fields at all is counted but not measured.
+      { at, model: "m", provider: "p" },
+    ],
+  });
+  const last = buckets[buckets.length - 1];
+
+  assert.equal(last.requests, 3);
+  assert.equal(last.tokens, 47 + 10);
+  assert.equal(last.measuredTokens, true);
+  assert.equal(last.cachedInputTokens, 40 + 0);
+  assert.equal(last.regularInputTokens, 0 + 5);
+  assert.equal(last.outputTokens, 7 + 5);
+  assert.equal(last.measuredBreakdown, true);
+});
+
+test("an empty ledger still returns a full, honest set of hours", async () => {
+  const { hourlyUsageRollup } = await import("../src/usage-events.mjs");
+  const buckets = hourlyUsageRollup({
+    now: Date.parse("2026-09-06T17:30:00.000Z"),
+    readEvents: () => [],
+  });
+  assert.equal(buckets.length, 24);
+  assert.ok(buckets.every((bucket) => bucket.requests === 0 && bucket.tokens === 0));
+  assert.ok(buckets.every((bucket) => !bucket.measuredTokens && !bucket.measuredBreakdown));
+});

@@ -928,10 +928,15 @@ function needsStrictOpenCodeToolCompatibility(route) {
 // recursive local JSON-Schema reference before the model sees the request.
 // Keep the paid Console Go gate model-specific: its other Responses models
 // retain recursive schemas until their own endpoint establishes the same
-// restriction.
-function needsNonRecursiveOpenCodeToolCompatibility(route) {
+// restriction. Command Code answers the identical `Recursive JSON schemas are
+// not currently supported` on every model behind either of its provider
+// variants (issue #626), so it is gated provider-wide rather than per model.
+const NON_RECURSIVE_SCHEMA_PROVIDER_IDS = new Set(["commandcode", "commandcode-messages"]);
+
+function needsNonRecursiveToolSchemaCompatibility(route) {
   const providerId = providerForModel(route)?.id;
   return (
+    NON_RECURSIVE_SCHEMA_PROVIDER_IDS.has(providerId) ||
     needsZenFreeToolCompatibility(route) ||
     (providerId === "opencode-go-responses" &&
       route.upstreamModel === "muse-spark-1.2-contributor")
@@ -3096,7 +3101,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   ) {
     namespacesFlattened = true;
   }
-  if (needsNonRecursiveOpenCodeToolCompatibility(route)) {
+  if (needsNonRecursiveToolSchemaCompatibility(route)) {
     // Run after namespace flattening so both native children and ordinary
     // function tools are repaired in the exact shape the endpoint validates.
     tools = repairToolSchemaRoots(tools, { nonRecursive: true });
@@ -3160,7 +3165,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     ) {
       namespacesFlattened = true;
     }
-    if (needsNonRecursiveOpenCodeToolCompatibility(route)) {
+    if (needsNonRecursiveToolSchemaCompatibility(route)) {
       // Stored tool-search results can introduce definitions after the first
       // repair pass, so enforce the same boundary on the expanded inventory.
       tools = repairToolSchemaRoots(tools, { nonRecursive: true });
