@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Native collaboration relay auth and quota failures preserve their semantics.**
+  When the native Codex relay needed to open a routed subagent payload receives
+  HTTP 429, the router now preserves that status instead of rewriting it to
+  502. The exact account-and-ciphertext refusal is remembered for a short,
+  bounded interval so immediate client retries fail locally without spending
+  another native relay request; other accounts and payloads remain isolated.
+  A native 401 is also preserved with a sanitized local error, allowing Codex's
+  own ChatGPT authentication recovery to refresh the session and retry without
+  exposing the upstream response body.
+
 - **Command Code forced tool choices now use the same bounded alias as the tool definition.**
   The 64-character compatibility added in #643 shortened provider-facing tool names but
   left an object 	ool_choice at the client's original spelling, so a forced long tool

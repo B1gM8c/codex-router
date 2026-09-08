@@ -359,8 +359,20 @@ const AGENT_PAYLOAD_CACHE_TTL_MS =
     : 15 * 60 * 1_000;
 const AGENT_PAYLOAD_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const AGENT_PAYLOAD_CACHE_MAX_ENTRIES = 256;
+const configuredAgentRelayFailureBackoffMs = Number(
+  process.env.MODEL_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS ||
+    process.env.CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS ||
+    60_000,
+);
+const AGENT_RELAY_FAILURE_BACKOFF_MS =
+  Number.isFinite(configuredAgentRelayFailureBackoffMs) &&
+  configuredAgentRelayFailureBackoffMs > 0
+    ? Math.floor(configuredAgentRelayFailureBackoffMs)
+    : 60_000;
+const AGENT_RELAY_FAILURE_MAX_ENTRIES = 128;
 const agentPayloadCache = new Map();
 const agentPayloadCacheInFlight = new Map();
+const agentPayloadRelayFailures = new Map();
 let agentPayloadCacheBytes = 0;
 const agentPayloadCacheMetrics = {
   hits: 0,
@@ -1543,6 +1555,40 @@ function agentPayloadCacheKey(encrypted, accountScope) {
     .digest("base64url");
 }
 
+function nativeAgentRelayRateLimitError() {
+  const error = new Error("Native collaboration payload relay is rate limited.");
+  error.status = 429;
+  error.code = "ERR_NATIVE_AGENT_RELAY_RATE_LIMITED";
+  return error;
+}
+
+function nativeAgentRelayUnauthorizedError() {
+  const error = new Error("Native collaboration payload relay requires refreshed authentication.");
+  error.status = 401;
+  error.code = "ERR_NATIVE_AGENT_RELAY_UNAUTHORIZED";
+  return error;
+}
+
+function purgeExpiredAgentRelayFailures(now = Date.now()) {
+  for (const [key, expiresAt] of agentPayloadRelayFailures) {
+    if (expiresAt <= now) agentPayloadRelayFailures.delete(key);
+  }
+}
+
+function agentRelayFailureActive(key, now = Date.now()) {
+  purgeExpiredAgentRelayFailures(now);
+  return agentPayloadRelayFailures.has(key);
+}
+
+function rememberAgentRelayFailure(key, now = Date.now()) {
+  purgeExpiredAgentRelayFailures(now);
+  agentPayloadRelayFailures.delete(key);
+  agentPayloadRelayFailures.set(key, now + AGENT_RELAY_FAILURE_BACKOFF_MS);
+  while (agentPayloadRelayFailures.size > AGENT_RELAY_FAILURE_MAX_ENTRIES) {
+    agentPayloadRelayFailures.delete(agentPayloadRelayFailures.keys().next().value);
+  }
+}
+
 function evictAgentPayload(key, { expired = false, evicted = false } = {}) {
   const entry = agentPayloadCache.get(key);
   if (!entry) return;
@@ -1597,7 +1643,10 @@ function rememberAgentPayload(key, plaintext) {
 }
 
 const agentPayloadCachePurgeTimer = setInterval(
-  () => purgeExpiredAgentPayloads(),
+  () => {
+    purgeExpiredAgentPayloads();
+    purgeExpiredAgentRelayFailures();
+  },
   Math.min(AGENT_PAYLOAD_CACHE_TTL_MS, 60_000),
 );
 agentPayloadCachePurgeTimer.unref?.();
@@ -1664,6 +1713,13 @@ async function relayEncryptedAgentPayloadOnce(
     signal,
   });
   if (!upstream.ok) {
+    if (upstream.status === 429) {
+      rememberAgentRelayFailure(cacheKey);
+      throw nativeAgentRelayRateLimitError();
+    }
+    if (upstream.status === 401) {
+      throw nativeAgentRelayUnauthorizedError();
+    }
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
     );
@@ -1737,6 +1793,7 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   const key = agentPayloadCacheKey(encrypted, accountScope);
   const cached = cachedAgentPayload(key);
   if (cached !== undefined) return cached;
+  if (agentRelayFailureActive(key)) throw nativeAgentRelayRateLimitError();
   const pending = agentPayloadCacheInFlight.get(key);
   if (pending) {
     agentPayloadCacheMetrics.coalesced += 1;
