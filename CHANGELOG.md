@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **OpenAI requests omit incompatible IDs from saved function calls.**
+  Before sending saved conversation history to OpenAI, the router now omits
+  optional `function_call.id` strings that do not start with `fc`, which OpenAI
+  rejects. It preserves `call_id`, matching results, compatible IDs, and requests
+  to external providers. Tests cover continuing and shortening a conversation,
+  sessions supplied by the caller or the router, and sending saved history again.
 - **Preserve tool calls after large fragmented response preludes.** Allow one
   unfinished initial event within the existing 10 MiB bound and match the
   namespace relay's limit, so later MCP calls retain their client identities.
