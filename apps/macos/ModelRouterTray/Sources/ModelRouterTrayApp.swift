@@ -1906,6 +1906,19 @@ final class RouterStore: ObservableObject {
     }
   }
 
+  // Reopening the panel does not need a new snapshot. `bin/control --json`
+  // spawns a Node process per target and costs seconds of CPU, while the
+  // registry it reports changes far more slowly than the tray is opened; the
+  // background poll and every mutation still refresh unconditionally. Activity
+  // and health are not covered by this: they have their own native probe.
+  // nonisolated so the default argument below can read it off the main actor.
+  nonisolated static let openSnapshotMaxAge: TimeInterval = 60
+
+  func refreshIfStale(maxAge: TimeInterval = RouterStore.openSnapshotMaxAge) async {
+    if let lastUpdated, Date().timeIntervalSince(lastUpdated) < maxAge { return }
+    await refresh()
+  }
+
   func refresh() async {
     isRefreshing = true
     defer { isRefreshing = false }
@@ -5495,7 +5508,10 @@ enum TrayTab: String, CaseIterable, Identifiable {
 private struct TrayView: View {
   @ObservedObject var store: RouterStore
   @AppStorage("trayTab") private var tab: TrayTab = .usage
-  @State private var providersExpanded = true
+  // The heavy settings sections all start closed. Each one builds tens to
+  // hundreds of rows, and opening the tray or switching to Settings paid for
+  // every one of them at once even though a given visit usually touches one.
+  @State private var providersExpanded = false
   @State private var providerFilter = ""
   @State private var savingsRange: SavingsRange = .day
   @State private var savingsRangeSelectedByUser = false
@@ -5697,7 +5713,7 @@ private struct TrayView: View {
     }
     .foregroundStyle(routerText)
     .task {
-      await store.refresh()
+      await store.refreshIfStale()
       selectInitialSavingsRange()
     }
     .onChange(of: savingsRangeDataFingerprint) { _ in
@@ -5765,7 +5781,10 @@ private struct TrayView: View {
       .id(store.language)
 
       ScrollView(showsIndicators: false) {
-        VStack(alignment: .leading, spacing: 14) {
+        // Lazy, because this column is the whole tab: a plain VStack lays out
+        // every section before the first frame, so the sections below the fold
+        // cost the same as the one being read.
+        LazyVStack(alignment: .leading, spacing: 14) {
           switch tab {
           case .usage: usageTab
           case .status: statusTab
@@ -6621,13 +6640,14 @@ private struct TrayView: View {
   private struct ModelSettingsAccordion: View {
     @ObservedObject var store: RouterStore
     let target: RouterTarget
-    @State private var subagentsExpanded = true
-    @State private var pickerExpanded = true
-    @State private var providerCatalogsExpanded = true
-    @State private var visionExpanded = true
-    // Local models are a first-class install surface. Keep this section open
-    // on launch so the catalog is not hidden behind the other settings cards.
-    @State private var localLlmExpanded = true
+    @State private var subagentsExpanded = false
+    @State private var pickerExpanded = false
+    @State private var providerCatalogsExpanded = false
+    @State private var visionExpanded = false
+    // Local models are a first-class install surface, but the catalog it draws
+    // is one of the most expensive sections in the panel. The header keeps it
+    // discoverable; opening it is one click and now only costs when asked for.
+    @State private var localLlmExpanded = false
     @State private var localDetailsExpanded = false
     @State private var expandedLocalFamilies = Set<String>()
     @State private var expandedLocalVariants = Set<String>()
@@ -6641,7 +6661,12 @@ private struct TrayView: View {
     // the tag rather than a Bool so the alert can name the model.
     @State private var pendingOversizedInstall: String?
     @State private var quickPicksExpanded = false
-    @State private var collapsedProviders = Set<String>()
+    // Opt-in rather than opt-out. Every group defaulting to expanded meant a
+    // tap on Settings built every model row the registry knows about -- the
+    // subagent and picker panels list the same 185 models, so roughly 450
+    // toggle rows -- before the tab could draw. The set now names only the
+    // groups the operator actually opened.
+    @State private var expandedProviders = Set<String>()
 
     private struct ProviderModels: Identifiable {
       let provider: String
@@ -6732,12 +6757,12 @@ private struct TrayView: View {
     private func providerBinding(_ section: String, _ provider: String) -> Binding<Bool> {
       let key = "\(section):\(provider)"
       return Binding(
-        get: { !collapsedProviders.contains(key) },
+        get: { expandedProviders.contains(key) },
         set: { expanded in
           if expanded {
-            collapsedProviders.remove(key)
+            expandedProviders.insert(key)
           } else {
-            collapsedProviders.insert(key)
+            expandedProviders.remove(key)
           }
         }
       )
