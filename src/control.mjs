@@ -754,16 +754,29 @@ async function printAccountUsage() {
       "ChatGPT account profiles are unavailable while credential discovery is disabled.",
     );
   }
-  const { readCodexAccountUsage } = await import("./codex-account-usage.mjs");
+  const { normalizeCodexAccountUsage, readCodexAccountUsage } = await import("./codex-account-usage.mjs");
   const {
     ensureChatGPTProfileAccounts,
     selectedChatGPTUsageProfile,
   } = await import("./chatgpt-profile-switch.mjs");
   await ensureChatGPTProfileAccounts();
   const profile = selectedChatGPTUsageProfile();
-  const usage = profile.home
-    ? await readCodexAccountUsage({ codexHome: profile.home })
-    : await readCodexAccountUsage();
+  let usage;
+  try {
+    usage = profile.home
+      ? await readCodexAccountUsage({ codexHome: profile.home })
+      : await readCodexAccountUsage();
+  } catch (error) {
+    // ChatGPT usage is optional for Control Center. Letting this throw dumps a
+    // Node stack onto stderr, which Electron surfaces as
+    // "Some router data could not load" over an otherwise healthy snapshot.
+    const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
+    usage = {
+      ...normalizeCodexAccountUsage({}, {}),
+      unavailable: true,
+      unavailableReason: reason,
+    };
+  }
   process.stdout.write(`${JSON.stringify({
     ...usage,
     accountSelection: profile.selection,

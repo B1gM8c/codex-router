@@ -30,7 +30,13 @@ function fakeAppServer(replies) {
         continue;
       }
       const reply = replies(message);
-      if (reply) stdout.write(`${JSON.stringify(reply)}\n`);
+      if (!reply) continue;
+      const { exitAfter, ...payload } = reply;
+      if (Object.keys(payload).length > 0) stdout.write(`${JSON.stringify(payload)}\n`);
+      if (exitAfter) {
+        stdout.end();
+        child.emit("exit", 1);
+      }
     }
   });
   return child;
@@ -253,6 +259,45 @@ test("a refused rateLimits read still returns usage instead of failing the panel
   assert.equal(value.secondary, null);
   assert.equal(value.summary.lifetimeTokens, 42);
   assert.deepEqual(value.dailyUsageBuckets, [{ startDate: "2026-09-01", tokens: 9 }]);
+});
+
+test("an app-server exit after one account read still returns that slice", async () => {
+  const value = await readCodexAccountUsage({
+    binary: "/fake/codex",
+    platform: "darwin",
+    timeoutMs: 2_000,
+    spawnImpl: () => fakeAppServer((message) => {
+      if (message.id === 1) return { id: 1, result: {} };
+      if (message.id === 2) {
+        return {
+          id: 2,
+          result: {
+            rateLimits: {
+              planType: "plus",
+              limitId: "codex",
+              primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+            },
+          },
+          exitAfter: true,
+        };
+      }
+      return undefined;
+    }),
+  });
+
+  assert.equal(value.planType, "plus");
+  assert.equal(value.primary.usedPercent, 40);
+  assert.deepEqual(value.dailyUsageBuckets, []);
+  assert.equal(value.summary.lifetimeTokens, null);
+});
+
+test("an app-server exit with no account replies still fails the probe", async () => {
+  await assert.rejects(readCodexAccountUsage({
+    binary: "/fake/codex",
+    platform: "darwin",
+    timeoutMs: 2_000,
+    spawnImpl: () => fakeAppServer(() => ({ exitAfter: true })),
+  }), /exited before replying \(1\)/);
 });
 
 test("a refused usage read still returns rate limits instead of failing the panel", async () => {

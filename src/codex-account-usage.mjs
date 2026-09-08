@@ -183,8 +183,17 @@ export function readCodexAccountUsage({
       else resolve(value);
     };
     const send = (message) => {
-      processHandle.stdin.write(`${JSON.stringify(message)}\n`);
+      try {
+        if (!processHandle.stdin || processHandle.stdin.destroyed) return false;
+        return processHandle.stdin.write(`${JSON.stringify(message)}\n`);
+      } catch {
+        return false;
+      }
     };
+    const usageFromReplies = () => normalizeCodexAccountUsage(
+      responses.get(2),
+      responses.get(3),
+    );
     const timer = setTimeout(
       () => finish(new Error("Codex account usage request timed out.")),
       timeoutMs,
@@ -194,7 +203,15 @@ export function readCodexAccountUsage({
       finish(new Error("The Codex app-server could not be started."));
     });
     processHandle.once("exit", (code) => {
-      if (!settled) finish(new Error(`Codex app-server exited before replying (${code ?? "signal"}).`));
+      if (settled) return;
+      // One of the two account reads can land, then the process can die before
+      // the other. That used to throw through Control Center and paint a Node
+      // stack over the rest of the snapshot. Partial replies are enough.
+      if (responses.size > 0) {
+        finish(undefined, usageFromReplies());
+        return;
+      }
+      finish(new Error(`Codex app-server exited before replying (${code ?? "signal"}).`));
     });
     lines.on("line", (line) => {
       let message;
@@ -227,7 +244,7 @@ export function readCodexAccountUsage({
         responses.set(message.id, message.result);
       }
       if (responses.size === 2) {
-        finish(undefined, normalizeCodexAccountUsage(responses.get(2), responses.get(3)));
+        finish(undefined, usageFromReplies());
       }
     });
 
