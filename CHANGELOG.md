@@ -12,6 +12,12 @@
   own ChatGPT authentication recovery to refresh the session and retry without
   exposing the upstream response body.
 
+- **Router-injected subagent interrupts now keep unique call IDs across turns.**
+  Streamed collaboration cleanup previously numbered injected `interrupt_agent`
+  calls from `call_router_interrupt_1` inside each request-scoped transform, so
+  a later turn could reuse an ID still present in Codex conversation history.
+  Stream and non-stream injection now share a UUID-backed call-ID generator,
+  preserving call/output pairing across long multi-turn agent sessions.
 - **OpenCode Go Muse Responses routes can continue after a completed web search.**
   Live replay probes for Muse Spark 1.2 and 1.3 Contributor confirmed that the
   Responses upstream accepts completed `web_search_call` history even though
