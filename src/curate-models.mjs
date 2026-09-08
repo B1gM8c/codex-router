@@ -460,10 +460,12 @@ async function main() {
     }
   }
 
-  const inheritedProfile = uniformProviderFamilyRequestProfile(
-    CHECKED_IN_MODELS,
-    familyProviderIds,
-  );
+  // Zen Free mixes unrelated upstream models behind one anonymous catalog.
+  // Its two Muse Responses ids have a documented model-specific profile, so a
+  // checked-in Muse pin must not lend that profile to every other free model.
+  const inheritedProfile = providerId === "opencode-free"
+    ? undefined
+    : uniformProviderFamilyRequestProfile(CHECKED_IN_MODELS, familyProviderIds);
 
   // Which models exist is decided by the provider's own /v1/models endpoint.
   // Metadata comes from that catalog, the interactive user, or the narrow
