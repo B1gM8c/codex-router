@@ -359,8 +359,20 @@ const AGENT_PAYLOAD_CACHE_TTL_MS =
     : 15 * 60 * 1_000;
 const AGENT_PAYLOAD_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const AGENT_PAYLOAD_CACHE_MAX_ENTRIES = 256;
+const configuredAgentRelayBackoffMs = Number(
+  process.env.MODEL_ROUTER_AGENT_RELAY_BACKOFF_MS ||
+    process.env.CODEX_ROUTER_AGENT_RELAY_BACKOFF_MS ||
+    60_000,
+);
+const AGENT_RELAY_BACKOFF_MS =
+  Number.isFinite(configuredAgentRelayBackoffMs) && configuredAgentRelayBackoffMs > 0
+    ? Math.floor(configuredAgentRelayBackoffMs)
+    : 60_000;
+const AGENT_RELAY_BACKOFF_MAX_MS = 5 * 60_000;
+const AGENT_RELAY_BACKOFF_MAX_ACCOUNTS = 64;
 const agentPayloadCache = new Map();
 const agentPayloadCacheInFlight = new Map();
+const agentRelayBackoffs = new Map();
 let agentPayloadCacheBytes = 0;
 const agentPayloadCacheMetrics = {
   hits: 0,
@@ -368,6 +380,8 @@ const agentPayloadCacheMetrics = {
   expirations: 0,
   evictions: 0,
   coalesced: 0,
+  rateLimitBackoffs: 0,
+  rateLimitRejects: 0,
 };
 
 let requestSequence = 0;
@@ -415,6 +429,7 @@ function activityPayload() {
 
 function resourceLimitsPayload() {
   purgeExpiredAgentPayloads();
+  purgeExpiredAgentRelayBackoffs();
   return {
     inFlightRequests: inFlightRequests.size,
     maxActiveRequests: MAX_ACTIVE_REQUESTS,
@@ -429,6 +444,8 @@ function resourceLimitsPayload() {
       maxBytes: AGENT_PAYLOAD_CACHE_MAX_BYTES,
       ttlMs: AGENT_PAYLOAD_CACHE_TTL_MS,
       inFlight: agentPayloadCacheInFlight.size,
+      rateLimitedAccounts: agentRelayBackoffs.size,
+      maxRateLimitedAccounts: AGENT_RELAY_BACKOFF_MAX_ACCOUNTS,
       ...agentPayloadCacheMetrics,
     },
   };
@@ -1596,8 +1613,57 @@ function rememberAgentPayload(key, plaintext) {
   }
 }
 
+function purgeExpiredAgentRelayBackoffs(now = Date.now()) {
+  for (const [accountScope, backoff] of agentRelayBackoffs) {
+    if (backoff.expiresAt <= now) agentRelayBackoffs.delete(accountScope);
+  }
+}
+
+function agentRelayRateLimitError(retryAfterMs, advertisedRetrySeconds) {
+  const retryAfterSeconds =
+    advertisedRetrySeconds > 0
+      ? advertisedRetrySeconds
+      : Math.max(1, Math.ceil(retryAfterMs / 1_000));
+  const error = new Error(
+    "The signed-in Codex account is rate limited, so the router cannot decrypt a native collaboration payload.",
+  );
+  error.status = 429;
+  error.code = "native_collaboration_relay_rate_limited";
+  error.publicMessage =
+    "The private model needs the signed-in Codex account to decrypt an existing collaboration payload, but that account is currently rate limited. Retry after the indicated delay or start a task without native collaboration history.";
+  error.retryAfterSeconds = retryAfterSeconds;
+  return error;
+}
+
+function cachedAgentRelayBackoff(accountScope, now = Date.now()) {
+  const backoff = agentRelayBackoffs.get(accountScope);
+  if (!backoff) return undefined;
+  if (backoff.expiresAt <= now) {
+    agentRelayBackoffs.delete(accountScope);
+    return undefined;
+  }
+  agentPayloadCacheMetrics.rateLimitRejects += 1;
+  return agentRelayRateLimitError(backoff.expiresAt - now);
+}
+
+function rememberAgentRelayBackoff(accountScope, headers, now = Date.now()) {
+  const retrySeconds = retryAfterSeconds(headers, { now });
+  const requestedMs = retrySeconds > 0 ? retrySeconds * 1_000 : AGENT_RELAY_BACKOFF_MS;
+  const backoffMs = Math.min(requestedMs, AGENT_RELAY_BACKOFF_MAX_MS);
+  agentRelayBackoffs.delete(accountScope);
+  agentRelayBackoffs.set(accountScope, { expiresAt: now + backoffMs });
+  while (agentRelayBackoffs.size > AGENT_RELAY_BACKOFF_MAX_ACCOUNTS) {
+    agentRelayBackoffs.delete(agentRelayBackoffs.keys().next().value);
+  }
+  agentPayloadCacheMetrics.rateLimitBackoffs += 1;
+  return agentRelayRateLimitError(backoffMs, retrySeconds);
+}
+
 const agentPayloadCachePurgeTimer = setInterval(
-  () => purgeExpiredAgentPayloads(),
+  () => {
+    purgeExpiredAgentPayloads();
+    purgeExpiredAgentRelayBackoffs();
+  },
   Math.min(AGENT_PAYLOAD_CACHE_TTL_MS, 60_000),
 );
 agentPayloadCachePurgeTimer.unref?.();
@@ -1625,6 +1691,7 @@ nativeCatalogDriftCheckTimer.unref?.();
 async function relayEncryptedAgentPayloadOnce(
   item,
   cacheKey,
+  accountScope,
   headers,
   signal,
 ) {
@@ -1664,6 +1731,9 @@ async function relayEncryptedAgentPayloadOnce(
     signal,
   });
   if (!upstream.ok) {
+    if (upstream.status === 429) {
+      throw rememberAgentRelayBackoff(accountScope, upstream.headers);
+    }
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
     );
@@ -1737,6 +1807,8 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   const key = agentPayloadCacheKey(encrypted, accountScope);
   const cached = cachedAgentPayload(key);
   if (cached !== undefined) return cached;
+  const rateLimit = cachedAgentRelayBackoff(accountScope);
+  if (rateLimit) throw rateLimit;
   const pending = agentPayloadCacheInFlight.get(key);
   if (pending) {
     agentPayloadCacheMetrics.coalesced += 1;
@@ -1752,6 +1824,7 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   operation.promise = relayEncryptedAgentPayloadOnce(
     item,
     key,
+    accountScope,
     headers,
     controller.signal,
   ).finally(() => {
@@ -5169,13 +5242,16 @@ const server = http.createServer((request, response) => {
     // and an unreachable upstream is indistinguishable from a router bug.
     const transport = describeTransportFailure(error);
     if (!response.headersSent) {
+      if (Number.isFinite(error?.retryAfterSeconds)) {
+        response.setHeader("Retry-After", String(error.retryAfterSeconds));
+      }
       writeJson(response, status, {
         error: {
           type: "local_router_error",
           code: transport?.code || error?.code,
           message: transport
             ? `The local router could not complete the request: ${transport.cause}.${transport.hint}`
-            : "The local router could not complete the request.",
+            : error?.publicMessage || "The local router could not complete the request.",
         },
       });
     } else {

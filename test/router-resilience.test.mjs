@@ -533,6 +533,144 @@ test("same encrypted payload shares one relay and expiry removes the retained pl
   }
 });
 
+test("native collaboration 429 is explicit and backs off only the limited account", async () => {
+  const nativeRequests = [];
+  let gatewayRequests = 0;
+  const native = await mockServer(async (request, response) => {
+    nativeRequests.push(request.headers["chatgpt-account-id"]);
+    if (request.headers["chatgpt-account-id"] === "account-a") {
+      response.writeHead(429, {
+        "Content-Type": "application/json",
+        "Retry-After": "120",
+      });
+      response.end(JSON.stringify({ error: { message: "usage exhausted" } }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(relayEventStream("account-b payload"));
+  });
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    gatewayRequests += 1;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "r-account-b", output: [] }));
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  const requestFor = (account, encrypted) =>
+    fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer session-${account}`,
+        "ChatGPT-Account-Id": account,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(encryptedRelayBody(encrypted)),
+    });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+
+    const first = await requestFor("account-a", "gAAAAA-limited-first=");
+    const firstBody = await first.json();
+    assert.equal(first.status, 429, JSON.stringify(firstBody));
+    assert.equal(first.headers.get("retry-after"), "120");
+    assert.equal(firstBody.error.code, "native_collaboration_relay_rate_limited");
+    assert.match(firstBody.error.message, /signed-in Codex account/i);
+
+    const blocked = await requestFor("account-a", "gAAAAA-limited-different=");
+    assert.equal(blocked.status, 429, await blocked.text());
+    assert.equal(nativeRequests.filter((account) => account === "account-a").length, 1);
+
+    const otherAccount = await requestFor("account-b", "gAAAAA-other-account=");
+    assert.equal(otherAccount.status, 200, await otherAccount.text());
+    assert.equal(nativeRequests.filter((account) => account === "account-b").length, 1);
+    assert.equal(gatewayRequests, 1);
+
+    const health = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+    assert.equal(health.resources.agentPayloadCache.rateLimitedAccounts, 1);
+    assert.equal(health.resources.agentPayloadCache.rateLimitBackoffs, 1);
+    assert.equal(health.resources.agentPayloadCache.rateLimitRejects, 1);
+  } finally {
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
+test("native collaboration relay retries after a headerless 429 backoff expires", async () => {
+  let nativeRequests = 0;
+  let gatewayRequests = 0;
+  const native = await mockServer(async (_request, response) => {
+    nativeRequests += 1;
+    if (nativeRequests === 1) {
+      response.writeHead(429, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "temporarily limited" } }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(relayEventStream("recovered payload"));
+  });
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    gatewayRequests += 1;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "r-recovered", output: [] }));
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_AGENT_RELAY_BACKOFF_MS: "50",
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  const send = (encrypted) =>
+    fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer session-account-a",
+        "ChatGPT-Account-Id": "account-a",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(encryptedRelayBody(encrypted)),
+    });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const limited = await send("gAAAAA-backoff-first=");
+    assert.equal(limited.status, 429, await limited.text());
+    const blocked = await send("gAAAAA-backoff-second=");
+    assert.equal(blocked.status, 429, await blocked.text());
+    assert.equal(nativeRequests, 1);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const recovered = await send("gAAAAA-backoff-third=");
+    assert.equal(recovered.status, 200, await recovered.text());
+    assert.equal(nativeRequests, 2);
+    assert.equal(gatewayRequests, 1);
+  } finally {
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
 test("same ciphertext never coalesces or caches across native accounts", async () => {
   const nativeRequests = [];
   const native = await mockServer(async (request, response) => {
