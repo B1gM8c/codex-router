@@ -198,12 +198,6 @@ import {
   loopbackProbeFetch,
 } from "./fetch-transport.mjs";
 import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
-import {
-  directResponsesBody,
-  directResponsesHeaders,
-  directResponsesTarget,
-  isDirectResponsesProvider,
-} from "./direct-responses-provider.mjs";
 
 installStableFetchTransport();
 
@@ -2502,10 +2496,9 @@ function compactionAttempts(route, aged, searchContract, { allowFailover = true 
   const settings = readFailoverSettings();
   if (!settings.enabled) return [route];
   const candidates = rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => (
-      !readHiddenModels().has(model.slug) &&
-      !isDirectResponsesProvider(providerForModel(model))
-    )),
+    selectedConfiguredListedModels().filter(
+      (model) => !readHiddenModels().has(model.slug),
+    ),
     {
       from: route,
       // The transcript being summarized is nearly all of the request, so its
@@ -3344,10 +3337,7 @@ async function prepareRoutedRequest({
 function failoverCandidates({ route, agedInput, flattenedNamespaces, searchContract, chain }) {
   const hidden = readHiddenModels();
   return rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => (
-      !hidden.has(model.slug) &&
-      !isDirectResponsesProvider(providerForModel(model))
-    )),
+    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
     {
       from: route,
       // Context fit is checked after rebuilding the request for each
@@ -3379,10 +3369,7 @@ function subagentTransportFailoverCandidates({ request, route, agedInput, search
   if (subagentEligibility(route)) return [];
   const hidden = readHiddenModels();
   let ranked = rankSubagentCandidates(
-    selectedConfiguredListedModels().filter((model) => (
-      !hidden.has(model.slug) &&
-      !isDirectResponsesProvider(providerForModel(model))
-    )),
+    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
     {
       chain,
       requiredCapabilities: [
@@ -3581,7 +3568,6 @@ async function handleResponses(request, response, requestUrl) {
   let clientGone = false;
   let requestedModel = "";
   let route;
-  let directResponses = false;
   let upstreamRetries;
   let upstreamStatus;
   let upstreamLatencyMs;
@@ -3664,9 +3650,6 @@ async function handleResponses(request, response, requestUrl) {
       model: route?.slug || requestedModel || undefined,
       ...activityMetadataFromHeaders(request.headers),
     });
-    directResponses = route
-      ? isDirectResponsesProvider(providerForModel(route))
-      : false;
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
     // Codex remote compaction V2 uses the ordinary Responses endpoint with a
     // terminal trigger. Detect the protocol shape before route dispatch so the
@@ -3675,7 +3658,7 @@ async function handleResponses(request, response, requestUrl) {
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
 
-    if (route && !directResponses && (compactV1 || compactV2)) {
+    if (route && (compactV1 || compactV2)) {
       const compaction = await handleRoutedCompaction(
         request,
         response,
@@ -3744,12 +3727,7 @@ async function handleResponses(request, response, requestUrl) {
         ...activityMetadataFromHeaders(request.headers),
       });
     };
-    if (route && directResponses) {
-      const provider = providerForModel(route);
-      target = directResponsesTarget(provider, requestUrl.pathname, requestUrl.search);
-      headers = directResponsesHeaders(request.headers);
-      routedBody = directResponsesBody(payload, route);
-    } else if (route) {
+    if (route) {
       // Resolve the selected route's search contract once, before encrypted
       // handoff normalization or any other external work. A later failover may
       // not reintroduce ambient search that this route never advertised.
@@ -3909,7 +3887,7 @@ async function handleResponses(request, response, requestUrl) {
     // live capability contract as every fallback. This catches unsupported
     // search history and sidecar changes after normalization before any
     // provider-bound bytes leave the router.
-    if (route && !directResponses) {
+    if (route) {
       assertRoutedSearchContract(route, builtSearchMode, searchContract);
     }
     let { response: upstream, retries } = await fetchWithRetry(
@@ -3941,7 +3919,7 @@ async function handleResponses(request, response, requestUrl) {
     // and the error translation below both need it, and it can only be read
     // once. Nothing is relayed either way, so reading it is free.
     let failedBodyText;
-    if (route && !directResponses && !upstream.ok) {
+    if (route && !upstream.ok) {
       failedBodyText = await boundedResponseText(
         upstream,
         MAX_BUFFERED_RESPONSE_BYTES,
@@ -4033,25 +4011,7 @@ async function handleResponses(request, response, requestUrl) {
     // recorded earlier: a quota that refilled early, a limit the operator
     // raised, or a reset time the provider got wrong all end the same way, and
     // a real answer is better evidence than anything on disk.
-    if (route && !directResponses && upstream.ok) clearProviderCooldown(route.provider);
-    // The direct bridge owns its own explicit failure vocabulary. It has not
-    // passed through LiteLLM, so translating the body as a gateway exception
-    // would erase the actionable browser/login/UI-drift error it produced.
-    if (route && directResponses && !upstream.ok) {
-      await pipeResponse(upstream, response, HOP_BY_HOP_HEADERS);
-      recordUsageEvent({
-        model: route.slug,
-        provider: canonicalProviderId(route.provider),
-        status: upstream.status,
-        durationMs: Date.now() - startedAt,
-        responseStartMs: upstreamLatencyMs,
-      });
-      observeSubagentOutcome(request, route, upstream.status);
-      finalStatus = upstream.status;
-      activityStatus = upstream.status;
-      usageRecorded = true;
-      return;
-    }
+    if (route && upstream.ok) clearProviderCooldown(route.provider);
     // Gateway error bodies leak LiteLLM's internal exception chain, which
     // reads like a router bug. Rewrite them to name the provider that failed.
     // Native traffic passes through untouched: OpenAI errors are already clear.
@@ -4116,12 +4076,12 @@ async function handleResponses(request, response, requestUrl) {
     const createResponsePipeline = (contentType) => {
       const usageObserver = new ResponseUsageTransform(contentType, {
         estimatedInputTokens:
-          ZERO_INPUT_ESTIMATE && route && !directResponses
+          ZERO_INPUT_ESTIMATE && route
             ? estimateInputTokens(routedBody, { contextWindow: route.contextWindow })
             : undefined,
       });
       const transforms = [usageObserver];
-      let envelopeCompat = !directResponses && route
+      let envelopeCompat = route
         ? zaiResponsesCompatTransform(route.provider, contentType)
         : undefined;
       // Z.ai Responses streams from GLM-5.3 can start assistant text after
@@ -4134,14 +4094,14 @@ async function handleResponses(request, response, requestUrl) {
         envelopeCompat = new ZaiResponsesCompatTransform();
       }
       if (envelopeCompat) transforms.push(envelopeCompat);
-      const grokReasoningSummaryCompat = !directResponses && route
+      const grokReasoningSummaryCompat = route
         ? grokReasoningSummaryCompatTransform(providerForModel(route), contentType)
         : undefined;
       if (grokReasoningSummaryCompat) transforms.push(grokReasoningSummaryCompat);
       // LiteLLM can add blank assistant envelopes while translating either
       // Chat Completions or Messages. The factory refuses native traffic and
       // providers that already speak Responses, so those paths gain no stage.
-      const translatedToolMessageCompat = !directResponses && route
+      const translatedToolMessageCompat = route
         ? translatedToolMessageCompatTransform(providerForModel(route), contentType)
         : undefined;
       if (translatedToolMessageCompat) transforms.push(translatedToolMessageCompat);
@@ -4163,7 +4123,7 @@ async function handleResponses(request, response, requestUrl) {
         );
       }
       const guard =
-        route && !directResponses && EMPTY_COMPLETION_RETRY
+        route && EMPTY_COMPLETION_RETRY
           ? new EmptyCompletionGuard(contentType, {
               maxPreludeBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
               maxPreludeMs: EMPTY_COMPLETION_PRELUDE_MS,
@@ -4300,7 +4260,7 @@ async function handleResponses(request, response, requestUrl) {
       // discarded attempt's staged headers are no longer authoritative even
       // when this check fails and the router writes its own local response.
       clearStagedResponseHead(response);
-      if (route && !directResponses) {
+      if (route) {
         assertRoutedSearchContract(route, builtSearchMode, searchContract);
       }
       emptyCompletionRetried = true;

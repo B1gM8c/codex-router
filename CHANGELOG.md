@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **The ChatGPT Web provider is removed: using it risked an OpenAI account
+  ban.** `chatgpt-web` routed Codex turns into an unofficial browser automation
+  of chatgpt.com, driven through a separately installed launcher on loopback
+  port 17841. Automating a ChatGPT account that way is outside OpenAI's terms of
+  service, and enforcement falls on the signed-in account: a suspension or
+  permanent ban costs the operator their ChatGPT subscription and their Codex
+  access with it. That is not a risk this router should carry behind a warning,
+  so the integration is gone rather than deprecated. Removed the provider
+  definition, its seven curation routes, the launcher metadata and catalog
+  handling in curation and discovery, the user-model slug rule, and the setup
+  documentation. The direct Responses contract existed only to serve it and
+  goes with it: `src/direct-responses-provider.mjs`, the router's
+  `directResponses` dispatch and error passthrough, the failover and
+  vision-bridge exclusions, the registry validation, and the client publication
+  filter. No other provider declared `directResponses`, `codexOnly`, or
+  `explicitSelection`, so every route now takes the ordinary routed path.
+  **Anyone who curated `chatgpt-web/*` rows should stop using them and delete
+  them** with `bin/curate-models chatgpt-web --remove <slug>` before updating;
+  after the update those entries reference a provider that no longer exists and
+  are skipped at load with a `Skipped user model: ... references unknown
+  provider chatgpt-web` warning, so nothing breaks, but the stale rows stay in
+  `user-models.json` until removed.
 - **A new native model no longer stays invisible after a Codex upgrade.** The
   account catalog endpoint gates its model list on `client_version`, but the
   router replayed the ETag it had cached under the *previous* version. The
