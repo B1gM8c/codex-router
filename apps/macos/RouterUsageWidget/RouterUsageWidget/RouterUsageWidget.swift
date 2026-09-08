@@ -293,7 +293,7 @@ struct RouterUsageWidgetView: View {
     VStack(alignment: .leading, spacing: 0) {
       WidgetHeader(snapshot: snapshot, compact: true)
       Spacer(minLength: 9)
-      Text("Today · \(source.name)")
+      Text("Today · \(source.name) · UTC")
         .font(.caption2.weight(.semibold))
         .textCase(.uppercase)
         .tracking(0.35)
@@ -321,7 +321,7 @@ struct RouterUsageWidgetView: View {
       WidgetHeader(snapshot: snapshot)
       HStack(alignment: .top, spacing: 15) {
         VStack(alignment: .leading, spacing: 1) {
-          Text("Today · \(source.name)")
+          Text("Today · \(source.name) · UTC")
             .font(.caption2.weight(.semibold))
             .textCase(.uppercase)
             .tracking(0.35)
