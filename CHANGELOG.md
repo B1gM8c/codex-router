@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Command Code forced tool choices now use the same bounded alias as the tool definition.**
+  The 64-character compatibility added in #643 shortened provider-facing tool names but
+  left an object 	ool_choice at the client's original spelling, so a forced long tool
+  could still be rejected as unknown. Forced choices for both Command Code variants now
+  pass through the same reversible namespace alias map as the advertised tools.
+
 - **Router-injected subagent interrupts now keep unique call IDs across turns.**
   Streamed collaboration cleanup previously numbered injected `interrupt_agent`
   calls from `call_router_interrupt_1` inside each request-scoped transform, so
