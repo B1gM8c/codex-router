@@ -969,9 +969,9 @@ function buildTokenActivity(
   now: number,
 ): { days: TokenActivityDay[]; months: TokenActivityMonth[]; today: number } {
   const today = new Date(now);
-  today.setHours(0, 0, 0, 0);
+  today.setUTCHours(0, 0, 0, 0);
   const first = new Date(today);
-  first.setDate(first.getDate() - first.getDay() - ((TOKEN_ACTIVITY_WEEKS - 1) * 7));
+  first.setUTCDate(first.getUTCDate() - first.getUTCDay() - ((TOKEN_ACTIVITY_WEEKS - 1) * 7));
 
   const tokensByDay = new Map<string, number>();
   const measuredDays = new Set<string>();
@@ -995,7 +995,7 @@ function buildTokenActivity(
     for (const event of events ?? []) {
       const at = new Date(event.at);
       if (!Number.isFinite(at.getTime())) continue;
-      const dateKey = localDateKey(at);
+      const dateKey = usageDateKey(at);
       const tokens = tokenCountFromEvent(event);
       if (tokens === null) continue;
       measuredDays.add(dateKey);
@@ -1005,26 +1005,26 @@ function buildTokenActivity(
 
   const days = Array.from({ length: TOKEN_ACTIVITY_WEEKS * 7 }, (_, index) => {
     const date = new Date(first);
-    date.setDate(first.getDate() + index);
-    const dateKey = localDateKey(date);
+    date.setUTCDate(first.getUTCDate() + index);
+    const dateKey = usageDateKey(date);
     return {
       date,
       dateKey,
       tokens: tokensByDay.get(dateKey) ?? 0,
       measured: measuredDays.has(dateKey),
       weekIndex: Math.floor(index / 7),
-      dayIndex: date.getDay(),
+      dayIndex: date.getUTCDay(),
     };
   });
 
-  const monthFormatter = new Intl.DateTimeFormat("en-US", { month: "short" });
+  const monthFormatter = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" });
   const months: TokenActivityMonth[] = [];
   let previousMonth = -1;
   for (const day of days) {
-    const month = day.date.getMonth();
+    const month = day.date.getUTCMonth();
     if (month === previousMonth) continue;
     previousMonth = month;
-    if (day.date.getDate() > 7) continue;
+    if (day.date.getUTCDate() > 7) continue;
     months.push({ label: monthFormatter.format(day.date), weekIndex: day.weekIndex });
   }
 
@@ -1039,6 +1039,7 @@ function tokenActivityForMode(
     month: "short",
     day: "numeric",
     year: "numeric",
+    timeZone: "UTC",
   });
   const weeklyTotals = new Map<number, number>();
   for (const day of days) {
@@ -1087,10 +1088,13 @@ function normalizeDateKey(value: string): string | null {
   return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
 }
 
-function localDateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
+// Usage day keys are UTC days wherever they come from -- the router writes them
+// that way and OpenAI's account stream reports them that way -- so the grid this
+// compares them against has to be built in the same day space.
+function usageDateKey(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = `${date.getUTCMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getUTCDate()}`.padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
@@ -1220,14 +1224,25 @@ function buildDailyTrafficBuckets(
   range: Exclude<TrafficRange, 24>,
   now: number,
 ): TrafficBucket[] {
+  // Daily buckets are keyed by UTC day, both by the router and by OpenAI's
+  // account stream. Anchoring this grid on local midnight put each bucket on
+  // the local day of the same name -- a different window than the one it
+  // measured, by the machine's offset -- and left the newest local day with no
+  // bucket to match until that offset had elapsed. Grid and labels are UTC so a
+  // bar names the day its number is from.
   const anchor = new Date(now);
-  anchor.setHours(0, 0, 0, 0);
+  anchor.setUTCHours(0, 0, 0, 0);
   const first = anchor.getTime() - (range - 1) * DAY_MS;
-  const labelFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+  const labelFormatter = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
   const fullFormatter = new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: range === 30 ? "numeric" : undefined,
+    timeZone: "UTC",
   });
   const buckets = Array.from({ length: range }, (_, index) => {
     const start = new Date(first + index * DAY_MS);
@@ -1252,7 +1267,7 @@ function buildDailyTrafficBuckets(
   let providerBuckets = 0;
   for (const provider of providers) {
     for (const usageBucket of provider.dailyUsageBuckets ?? []) {
-      const index = indexForLocalDay(usageBucket.startDate, first, range);
+      const index = indexForUsageDay(usageBucket.startDate, first, range);
       if (index === null) continue;
       const bucket = buckets[index];
       providerBuckets += 1;
@@ -1301,8 +1316,9 @@ function buildDailyTrafficBuckets(
   return buckets;
 }
 
-function indexForLocalDay(value: string, first: number, count: number): number | null {
-  const date = new Date(`${value}T00:00:00`);
+function indexForUsageDay(value: string, first: number, count: number): number | null {
+  // `T00:00:00` with no zone is local midnight; the key is a UTC day.
+  const date = new Date(`${value}T00:00:00Z`);
   if (!Number.isFinite(date.getTime())) return null;
   const index = Math.floor((date.getTime() - first) / DAY_MS);
   return index >= 0 && index < count ? index : null;
