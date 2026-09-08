@@ -6917,6 +6917,69 @@ test("router replays verified search history without exposing a new search tool"
   }
 });
 
+test("checked-in opencode Muse Responses routes replay completed search history without advertising search", async () => {
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(await bodyJson(request));
+    json(response, 200, {
+      id: `resp-${gatewayRequests.length}`,
+      object: "response",
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "ok" }],
+      }],
+    });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const history = [{
+    type: "web_search_call",
+    id: "completed-search-history",
+    status: "completed",
+    action: { type: "search", query: "router contract" },
+  }];
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const slug of [
+      "opencode-go-responses/muse-spark-1.2-contributor",
+      "opencode-go-responses/muse-spark-1.3-contributor",
+    ]) {
+      const response = await fetch(`${routerBase(routerPort)}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CALLER_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ model: slug, input: history }),
+      });
+      assert.equal(response.status, 200, router.testErrors());
+    }
+
+    assert.deepEqual(
+      gatewayRequests.map((request) => request.model),
+      [
+        "opencode-go-responses-muse-spark-1-2-contributor",
+        "opencode-go-responses-muse-spark-1-3-contributor",
+      ],
+    );
+    assert.ok(gatewayRequests.every((request) => (
+      Array.isArray(request.input) &&
+      request.input.some((item) => item.type === "web_search_call") &&
+      (!Array.isArray(request.tools) || request.tools.every((tool) => tool.type !== "web_search"))
+    )));
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
 test("API forwarder strips web_search_options for Fireworks", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {

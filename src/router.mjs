@@ -3943,12 +3943,51 @@ async function handleResponses(request, response, requestUrl) {
         MAX_BUFFERED_RESPONSE_BYTES,
         controller.signal,
       );
-      const verdict = classifyRoutedFailure({
+      let verdict = classifyRoutedFailure({
         status: upstream.status,
         bodyText: failedBodyText,
         retryAfterSeconds: retryAfterSeconds(upstream.headers),
       });
-      if (verdict.swap && !exactRouteProbe) {
+      // The provider forwarder emits the reserved transport marker only when
+      // it failed before any provider response was available. Cross-model
+      // failover already treats that marker as replay-safe, but an ordinary
+      // turn (or a single-provider install) has no fallback candidate. Retry
+      // the exact same materialized request once before changing models or
+      // surfacing the 502. Generic provider 5xx bodies never enter this branch,
+      // and nothing can be replayed after caller bytes have been sent.
+      if (
+        verdict.reason === "transport" &&
+        nothingRelayed(response) &&
+        !controller.signal.aborted
+      ) {
+        console.error(
+          `[codex-router] routed transport retry 1/1 model=${route.slug} path=${requestUrl.pathname}`,
+        );
+        upstream = await fetch(target, {
+          method: "POST",
+          headers,
+          body: routedBody,
+          signal: controller.signal,
+        });
+        upstreamRetries = (upstreamRetries || 0) + 1;
+        upstreamStatus = upstream.status;
+        upstreamLatencyMs = Date.now() - startedAt;
+        failedBodyText = upstream.ok
+          ? undefined
+          : await boundedResponseText(
+              upstream,
+              MAX_BUFFERED_RESPONSE_BYTES,
+              controller.signal,
+            );
+        verdict = upstream.ok
+          ? { swap: false }
+          : classifyRoutedFailure({
+              status: upstream.status,
+              bodyText: failedBodyText,
+              retryAfterSeconds: retryAfterSeconds(upstream.headers),
+            });
+      }
+      if (!upstream.ok && verdict.swap && !exactRouteProbe) {
         // Believe the provider about when it will be back before trying anyone
         // else, so the next turn skips it instead of paying for the same
         // rejection again.
