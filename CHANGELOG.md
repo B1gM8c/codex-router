@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **A new native model no longer stays invisible after a Codex upgrade.** The
+  account catalog endpoint gates its model list on `client_version`, but the
+  router replayed the ETag it had cached under the *previous* version. The
+  server answered `304`, and the router then restamped that pre-upgrade body
+  with the new version — so `cacheIsFresh` passed forever, the model
+  fingerprint never moved, drift never fired, and GPT-6-Astra never reached the
+  picker while the router was installed (issue #645). A `client_version` change
+  now sends an unconditional request, and a `304` answering an unconditional
+  request is treated as a failure rather than blessing the stale body.
+  Revalidation within one `client_version` is unchanged.
+- **An outdated `codex` on PATH can no longer strip a model out of Codex's own
+  cache.** The same endpoint gates its list on `client_version` — measured
+  live, `0.150.0` is not offered `gpt-6-astra` while `0.153.4` is. When the
+  Codex the router resolves is older than the client that last wrote
+  `models_cache.json`, the refresh now declines to write (`stale-client`)
+  instead of replacing the richer list with its own poorer one.
+- **A missing native capture now counts as catalog drift.** With
+  `native-models.json` absent, `nativeCatalogDriftDetected()` returned "nothing
+  to compare" and the startup reconciliation never republished, stranding the
+  picker on whatever was last written even as the account gained models. A
+  missing capture alongside a valid account cache is maximal drift, and
+  republishing re-captures from that cache.
+
 - **Command Code forced tool choices now use the same bounded alias as the tool definition.**
   The 64-character compatibility added in #643 shortened provider-facing tool names but
   left an object 	ool_choice at the client's original spelling, so a forced long tool
