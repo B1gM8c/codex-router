@@ -804,7 +804,7 @@ function jsonIsUnambiguousForRewrite(text, { allowLossyNumbers = false } = {}) {
   }
 }
 
-function jsonArgumentsAreUnambiguous(value, { allowEmpty = false } = {}) {
+export function jsonArgumentsAreUnambiguous(value, { allowEmpty = false } = {}) {
   if (typeof value !== "string") return true;
   if (allowEmpty && value.trim() === "") return true;
   return jsonIsUnambiguousForRewrite(value);
