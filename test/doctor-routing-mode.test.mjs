@@ -50,10 +50,11 @@ esac
 function child(script, args, env) {
   const childEnv = {
     ...env,
-    // This test redirects Codex/router state, but Windows service status reads
-    // the machine-wide Task Scheduler. A developer with the real router
-    // running would otherwise make fixture doctor calls wait on the live task.
-    ...(process.platform === "win32" && script === "doctor.mjs"
+    // State-directory isolation does not isolate the host's service manager.
+    // A live launch agent, systemd unit or scheduled task would give this
+    // fixture a 30s health wait on its deliberately unused port. Keep these
+    // catalog/config tests independent of the developer's installed service.
+    ...(script === "doctor.mjs"
       ? { CODEX_ROUTER_SERVICE_PLATFORM: "test-fixture" }
       : {}),
   };
@@ -154,6 +155,7 @@ wire_api = "responses"
       writeFileSync(nativeCapturePath, `${JSON.stringify(nativeCapture)}\n`, { mode: 0o600 });
 
       const doctor = child("doctor.mjs", ["--json"], env);
+      assert.ifError(doctor.error);
       const report = JSON.parse(doctor.stdout);
       const byName = new Map(report.checks.map((check) => [check.name, check]));
       assert.deepEqual(byName.get("Merged catalog"), {
@@ -275,6 +277,7 @@ test(
       assert.equal(enabled.status, 0, enabled.stderr);
 
       const doctor = child("doctor.mjs", ["--json"], env);
+      assert.ifError(doctor.error);
       const report = JSON.parse(doctor.stdout);
       const byName = new Map(report.checks.map((check) => [check.name, check]));
       assert.deepEqual(byName.get("Codex model catalog"), {
