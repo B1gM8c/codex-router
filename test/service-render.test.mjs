@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { serviceGrokPatchHookEnvironment } from "../src/grok-patch-hook-settings.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -54,6 +55,28 @@ function serviceCommand(
 function render(script, platform, testRoot, target = "codex", sourceRoot = root) {
   return serviceCommand(script, platform, testRoot, "render", target, sourceRoot);
 }
+
+test("service regeneration retains persisted hook opt-in on all platforms", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "router-hook-service-"));
+  const stateDir = path.join(testRoot, "codex router state");
+  mkdirSync(stateDir, { recursive: true });
+  const file = path.join(stateDir, "grok-patch-hook.json");
+  try {
+    for (const [platform, script] of [["darwin", "service-macos.mjs"], ["linux", "service-linux.mjs"], ["win32", "service-windows.mjs"]]) {
+      for (const [contents, enabled] of [['{"version":1,"enabled":true}', true], ['{"version":1,"enabled":false}', false], ['{"version":2,"enabled":true}', false], ['{', false]]) {
+        writeFileSync(file, contents, { mode: 0o600 });
+        const output = serviceCommand(script, platform, testRoot, "render", "codex", root, { CODEX_ROUTER_GROK_PATCH_HOOK: undefined });
+        assert.equal(output.includes("CODEX_ROUTER_GROK_PATCH_HOOK"), enabled, `${platform}: ${contents}`);
+      }
+    }
+    writeFileSync(file, '{"version":1,"enabled":true}', { mode: 0o600 });
+    for (const flag of ["0", "1", "true", ""]) {
+      assert.deepEqual(serviceGrokPatchHookEnvironment({ stateDir, environment: { CODEX_ROUTER_GROK_PATCH_HOOK: flag } }), { CODEX_ROUTER_GROK_PATCH_HOOK: flag === "1" ? "1" : "0" });
+    }
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
 
 function writePoolEnvironmentFixture(testRoot) {
   const stateDir = path.join(testRoot, "codex router state");

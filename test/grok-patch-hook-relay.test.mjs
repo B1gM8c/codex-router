@@ -25,6 +25,7 @@ test("hook transport requires exact route, flag, and capability together", () =>
     for (const flag of [undefined, "0", "true", "1"]) {
       for (const declaration of [undefined, capability, `${capability}, ${capability}`, "structured-patch-v2"]) {
         assert.equal(grokPatchHookEnabled({ slug }, { [header]: declaration }, { CODEX_ROUTER_GROK_PATCH_HOOK: flag }), slug === "grok-oauth/grok-4.6" && flag === "1" && declaration === capability);
+        assert.equal(grokPatchHookEnabled({ slug }, {}, { CODEX_ROUTER_GROK_PATCH_HOOK: flag }, declaration), slug === "grok-oauth/grok-4.6" && flag === "1" && declaration === capability);
       }
     }
   }

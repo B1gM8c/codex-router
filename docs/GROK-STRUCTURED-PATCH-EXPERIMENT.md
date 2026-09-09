@@ -99,12 +99,13 @@ Activation requires all three on each request:
 
 - Route exactly `grok-oauth/grok-4.6`.
 - Router process environment `CODEX_ROUTER_GROK_PATCH_HOOK=1`.
-- Client header `x-codex-router-patch-hook: structured-patch-v1`.
+- Client header `x-codex-router-patch-hook: structured-patch-v1`, or the
+  explicit capability base path described under deployment below.
 
-The header declares a capability; it is not proof that a hook is trusted or
+The header or endpoint declares a capability; it is not proof that a hook is trusted or
 that its code is protected. The offline native verifier independently checks
 hook discovery and command trust using a disposable `CODEX_HOME`. Do not send
-this header from a client that has not passed its own preflight. If either
+this declaration from a client that has not passed its own preflight. If either
 opt-in is missing, the previous behavior remains, including the original
 `CODEX_ROUTER_GROK_STRUCTURED_PATCH=1` codec when separately enabled. When both
 modes are enabled, negotiated hook mode takes precedence. Only a declared
@@ -163,6 +164,36 @@ canary and in-workspace fixture unchanged. Choose a parent outside the native
 workspace and writable roots for this negative control.
 
 ### Deployment and acceptance boundaries
+
+Clients whose built-in provider cannot set the capability header may explicitly
+select `/v1/_codex-router/structured-patch-v1` as their Router base path.
+The existing bearer or caller-path authentication is still required. Router
+normalizes the path only after authentication, consumes the capability locally,
+and still requires the exact Grok 4.6 route and Router hook flag. Other model
+routes retain their tool behavior. The endpoint is a client declaration, not
+proof that the hook was discovered, trusted or executed.
+
+The Codex config manager preserves this explicitly selected base on enable,
+repair and caller-capability refresh; fresh installs continue to select `/v1`.
+Selecting it requires the same independent protected-payload and native-trust
+preflight as the header. Ordinary already-loaded Desktop tasks retain their
+provider endpoint; changing the file does not update their existing children.
+Verify a freshly loaded real Desktop task and child before claiming activation.
+
+An installer can persist the Router opt-in as the private state file
+`grok-patch-hook.json`, exactly `{"version":1,"enabled":true}`. macOS, Linux
+and Windows service renderers retain this setting during regeneration. An
+explicit `CODEX_ROUTER_GROK_PATCH_HOOK` environment value takes precedence;
+only `1` enables it. Missing or malformed state cannot enable it. To roll back,
+restore the ordinary client base, remove the opt-in file and service flag, and
+reload the service and client. This file neither installs nor trusts a hook.
+
+The offline endpoint probe also supports the ordinary built-in OpenAI provider
+with a disposable noncredential fixture; it does not select a custom profile:
+
+```sh
+node scripts/verify-grok-apply-patch-guidance.mjs <venv-python> --native-hook --native-hook-endpoint --codex=<codex-binary>
+```
 
 This repository does not automatically install or trust the hook, change
 Codex configuration, set the capability header, or provision benchmark

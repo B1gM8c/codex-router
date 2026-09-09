@@ -20,8 +20,11 @@ import { routedModel } from "../src/catalog.mjs";
 import { MODEL_BY_SLUG } from "../src/model-registry.mjs";
 
 import { GROK_PATCH_HOOK_PREFIX, GROK_PATCH_HOOK_HEADER, GROK_PATCH_HOOK_CAPABILITY } from "../src/grok-patch-hook-transport.mjs";
+import { CODEX_PATCH_HOOK_BASE_PATH } from "../src/codex-patch-hook-endpoint.mjs";
 
 const nativeHook = process.argv.includes("--native-hook");
+const hookEndpoint = process.argv.includes("--native-hook-endpoint");
+if (hookEndpoint && !nativeHook) throw new Error("--native-hook-endpoint requires --native-hook");
 const structured = nativeHook || process.argv.includes("--structured");
 const codexBinary = process.argv.find((arg) => arg.startsWith("--codex="))?.slice("--codex=".length);
 if (codexBinary && !structured) throw new Error("--codex requires --structured or --native-hook");
@@ -48,7 +51,8 @@ const structuredOperations = { operations: [{ op: "add", path: 'café "quotes".t
 let nativeRecoveryProbe;
 let hookRawWireArguments;
 const nativeInvalidArguments = ' { "operations" : [] } \n' + " ".repeat(errorPadding);
-const hookHeaders = nativeHook ? { [GROK_PATCH_HOOK_HEADER]: GROK_PATCH_HOOK_CAPABILITY } : {};
+const hookHeaders = nativeHook && !hookEndpoint ? { [GROK_PATCH_HOOK_HEADER]: GROK_PATCH_HOOK_CAPABILITY } : {};
+const clientBaseUrl = (port) => callerBaseUrl(port, CALLER_KEY) + (hookEndpoint ? CODEX_PATCH_HOOK_BASE_PATH.slice(3) : "");
 const wirePatchInput = (args) => nativeHook ? GROK_PATCH_HOOK_PREFIX + args : serializeStructuredPatch(JSON.parse(args));
 
 const python = process.argv[2] || process.env.LITELLM_PYTHON;
@@ -128,11 +132,18 @@ async function openPort() {
   return port;
 }
 
-function spawnChild(command, args, env, { detached = false, cwd = root, interactive = false } = {}) {
+function nativeProbeEnvironment(home) {
+  const environment = Object.fromEntries(["PATH", "SystemRoot", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "LANG"].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+  return { ...environment, HOME: home, USERPROFILE: home, CODEX_HOME: home,
+    CODEX_API_KEY: "offline-protocol-fixture-not-a-real-key",
+    OPENAI_API_KEY: "offline-protocol-fixture-not-a-real-key" };
+}
+
+function spawnChild(command, args, env, { detached = false, cwd = root, interactive = false, inheritEnvironment = true } = {}) {
   const spawnable = spawnableCommand(command, args);
   const child = spawn(spawnable.command, spawnable.args, {
     cwd,
-    env: { ...process.env, ...env },
+    env: { ...(inheritEnvironment ? process.env : {}), ...env },
     stdio: [interactive ? "pipe" : "ignore", "pipe", "pipe"],
     detached,
     ...spawnable.options,
@@ -300,7 +311,7 @@ async function prepareTrustedNativeHook(codexHome, fixtureDir) {
   if (nativeHookControl !== "missing") writeHook(command);
   writeFileSync(configPath, "[features]\nhooks = true\nplugins = false\nremote_plugin = false\n", { mode: 0o600 });
   async function listHooks() {
-    const child = spawnChild(codexBinary, ["app-server"], { CODEX_HOME: codexHome }, { cwd: fixtureDir, interactive: true });
+    const child = spawnChild(codexBinary, ["app-server"], nativeProbeEnvironment(codexHome), { cwd: fixtureDir, interactive: true, inheritEnvironment: false });
     let partial = "";
     let nextId = 0;
     const pending = new Map();
@@ -640,7 +651,7 @@ try {
   });
   await waitHttp(`http://127.0.0.1:${routerPort}/health`, routerChild);
 
-  const routerUrl = `${callerBaseUrl(routerPort, CALLER_KEY)}/responses`;
+  const routerUrl = `${clientBaseUrl(routerPort)}/responses`;
 
   async function postTurn(payload) {
     const response = await fetch(routerUrl, {
@@ -823,7 +834,7 @@ try {
     // does not advertise native apply_patch and cannot exercise this bridge.
     const bundled = spawnSync(codexBinary, ["debug", "models", "--bundled"], {
       encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL", maxBuffer: 32 * 1024 * 1024,
-      env: { ...process.env, CODEX_HOME: codexHome },
+      env: nativeProbeEnvironment(codexHome),
     });
     assert.equal(bundled.status, 0, "read the installed binary's bundled model metadata");
     const nativeModels = JSON.parse(bundled.stdout).models;
@@ -842,16 +853,17 @@ try {
       'model_provider="local-protocol"',
       `model_catalog_json=${JSON.stringify(catalogPath)}`,
       'model_providers.local-protocol.name="Offline structured patch proof"',
-      `model_providers.local-protocol.base_url=${JSON.stringify(callerBaseUrl(routerPort, CALLER_KEY))}`,
+      `model_providers.local-protocol.base_url=${JSON.stringify(clientBaseUrl(routerPort))}`,
       'model_providers.local-protocol.wire_api="responses"',
       'model_providers.local-protocol.requires_openai_auth=false',
       'model_providers.local-protocol.supports_websockets=false',
       'approval_policy="never"',
       'model_reasoning_effort="high"',
     ]) args.push("-c", setting);
-    if (nativeHook) args.push("-c", `model_providers.local-protocol.http_headers={${JSON.stringify(GROK_PATCH_HOOK_HEADER)}=${JSON.stringify(GROK_PATCH_HOOK_CAPABILITY)}}`);
+    if (nativeHook && !hookEndpoint) args.push("-c", `model_providers.local-protocol.http_headers={${JSON.stringify(GROK_PATCH_HOOK_HEADER)}=${JSON.stringify(GROK_PATCH_HOOK_CAPABILITY)}}`);
+    if (hookEndpoint) args.push("-c", 'model_provider="openai"', "-c", `openai_base_url=${JSON.stringify(clientBaseUrl(routerPort))}`);
     args.push("Offline tool protocol test. Only fixture.txt in this temporary workspace may be edited. Process the supplied tool calls and finish.");
-    const client = spawnChild(codexBinary, args, { CODEX_HOME: codexHome }, { cwd: fixtureDir });
+    const client = spawnChild(codexBinary, args, nativeProbeEnvironment(codexHome), { cwd: fixtureDir, inheritEnvironment: false });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -864,6 +876,7 @@ try {
       client.once("exit", (code) => resolve(code));
     }).finally(() => clearTimeout(timer));
     if (mockFailure) throw mockFailure;
+    if (hookEndpoint) assert.equal(/falling back to HTTP|Falling back from WebSockets/i.test(client.testOutput()), false, "built-in provider must complete through the capability WebSocket endpoint without HTTP fallback");
     assert.equal(timedOut, false, "native offline handler probe deadline");
     if (exit !== 0 && nativeFault !== "invalid-arguments") {
       process.stderr.write(`offline probe state: ${JSON.stringify(nativeRecoveryProbe)}\n`);

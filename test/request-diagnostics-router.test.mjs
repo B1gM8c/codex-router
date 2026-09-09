@@ -54,6 +54,7 @@ function run(env) {
     cwd: root,
     env: {
       ...process.env,
+      CODEX_HOME: path.join(stateDir, "codex-home"),
       MODEL_ROUTER_STATE_DIR: stateDir,
       CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
       CODEX_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
@@ -99,6 +100,22 @@ async function stopChild(child) {
 
 async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
+}
+
+function websocketHandshake(url, authenticated) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(url, { headers: {
+      Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13",
+      "OpenAI-Beta": "responses_websockets=2026-02-06",
+      "Sec-WebSocket-Key": Buffer.from("0123456789abcdef").toString("base64"),
+      ...(authenticated ? { Authorization: `Bearer ${CALLER_KEY}` } : {}),
+    } });
+    request.once("error", reject);
+    request.once("upgrade", (response, socket) => { socket.destroy(); resolve(response.statusCode); });
+    request.once("response", response => { response.resume(); resolve(response.statusCode); });
+    request.setTimeout(5000, () => request.destroy(new Error("handshake deadline")));
+    request.end();
+  });
 }
 
 function usageEvents(stateDir) {
@@ -297,11 +314,17 @@ test("a non-Grok-4.6 turn still records requestId and omits contextBytes", async
   }
 });
 
-for (const hookMode of [false, true]) test(`actual routed usage records ${hookMode ? "hook" : "structured patch"} version and application without payload content`, async () => {
+for (const mode of ["structured", "header", "endpoint"]) test(`actual routed usage records ${mode} version and application without payload content`, async () => {
+  const hookMode = mode !== "structured";
   const gateway = await mockServer(async (request, response) => {
     if (request.method === "GET") return json(response, 200, { ok: true, credential_present: true });
-    await bodyJson(request);
-    json(response, 200, { id: "resp_diagnostic", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] });
+    const payload = await bodyJson(request);
+    assert.equal(request.headers["x-codex-router-patch-hook"], undefined);
+    assert.equal(request.url.includes("structured-patch-v1"), false);
+    const patch = payload.tools?.find(tool => tool.parameters?.properties?.operations);
+    json(response, 200, { id: "resp_diagnostic", output: hookMode && patch
+      ? [{ type: "function_call", id: "fc_hook", call_id: "call_hook", name: patch.name, arguments: "{" }]
+      : [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] });
   });
   const routerPort = await openPort();
   const router = run({
@@ -313,12 +336,30 @@ for (const hookMode of [false, true]) test(`actual routed usage records ${hookMo
   });
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
+    if (mode === "endpoint") {
+      const unauthenticated = await fetch(`http://127.0.0.1:${routerPort}/v1/_codex-router/structured-patch-v1/models`);
+      assert.equal(unauthenticated.status, 401);
+      await unauthenticated.text();
+      const authenticated = await fetch(`http://127.0.0.1:${routerPort}/v1/_codex-router/structured-patch-v1/models`, { headers: { Authorization: `Bearer ${CALLER_KEY}` } });
+      assert.equal(authenticated.status, 200);
+      await authenticated.text();
+      const wsUrl = `http://127.0.0.1:${routerPort}/v1/_codex-router/structured-patch-v1/responses`;
+      assert.equal(await websocketHandshake(wsUrl, false), 401);
+      assert.equal(await websocketHandshake(wsUrl, true), 101);
+    }
     for (const applied of [true, false]) {
-      const response = await fetch(`${routerBase(routerPort)}/responses`, {
-        method: "POST", headers: { "Content-Type": "application/json", ...(hookMode ? { "x-codex-router-patch-hook": "structured-patch-v1" } : {}) },
+      const response = await fetch(`${routerBase(routerPort)}${mode === "endpoint" ? "/_codex-router/structured-patch-v1" : ""}/responses`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...(mode === "header" ? { "x-codex-router-patch-hook": "structured-patch-v1" } : {}) },
         body: JSON.stringify({ ...GROK_PAYLOAD, tools: applied ? [{ type: "custom", name: "apply_patch", description: "private tool description" }] : GROK_PAYLOAD.tools }),
       });
-      assert.equal(response.status, 200, await response.text());
+      const body = await response.text();
+      assert.equal(response.status, 200, body);
+      if (hookMode && applied) {
+        const item = JSON.parse(body).output[0];
+        assert.equal(item.type, "custom_tool_call");
+        assert.equal(item.call_id, "call_hook");
+        assert.equal(item.input, "CODEX_ROUTER_STRUCTURED_PATCH_V1\n{");
+      }
       const events = await waitForUsageEvents(router.stateDir, applied ? 1 : 2, router);
       assert.deepEqual(events.at(-1).grokStructuredPatch, { enabled: true, applied, schemaVersion: 1, ...(hookMode ? { mode: "client_hook" } : {}) });
     }

@@ -15,6 +15,9 @@ name: Grok apply_patch protocol
       - "src/grok-apply-patch-guidance.mjs"
       - "src/grok-structured-patch.mjs"
       - "src/grok-patch-hook*.mjs"
+      - "src/codex-patch-hook-endpoint.mjs"
+      - "src/caller-auth.mjs"
+      - "test/codex-patch-hook-endpoint.test.mjs"
       - "scripts/grok-patch-hook.mjs"
       - "test/grok-patch-hook*.test.mjs"
       - "src/namespace-relay.mjs"
@@ -32,6 +35,9 @@ name: Grok apply_patch protocol
       - "src/grok-apply-patch-guidance.mjs"
       - "src/grok-structured-patch.mjs"
       - "src/grok-patch-hook*.mjs"
+      - "src/codex-patch-hook-endpoint.mjs"
+      - "src/caller-auth.mjs"
+      - "test/codex-patch-hook-endpoint.test.mjs"
       - "scripts/grok-patch-hook.mjs"
       - "test/grok-patch-hook*.test.mjs"
       - "src/namespace-relay.mjs"
@@ -126,3 +132,4 @@ jobs:
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python"
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --structured
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook
+          node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook --native-hook-endpoint

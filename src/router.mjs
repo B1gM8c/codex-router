@@ -111,6 +111,7 @@ import {
   grokStructuredPatchEnabled,
 } from "./grok-structured-patch.mjs";
 import { GROK_PATCH_HOOK_CODEC, grokPatchHookEnabled } from "./grok-patch-hook-transport.mjs";
+import { CODEX_PATCH_HOOK_BASE_PATH, codexPatchHookEndpoint } from "./codex-patch-hook-endpoint.mjs";
 import {
   NamespaceToolCallTransform,
   agentMessagesAsUserMessages,
@@ -3210,7 +3211,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
-  const patchHook = grokPatchHookEnabled(route, request.headers);
+  const patchHook = grokPatchHookEnabled(route, request.headers, process.env, request.codexRouterPatchHookCapability);
   const structuredPatch = (patchHook || grokStructuredPatchEnabled(route)) &&
     Array.isArray(tools) && tools.some(
       (tool) => tool?.type === "custom" && tool.name === "apply_patch",
@@ -5175,7 +5176,9 @@ async function handleRequest(request, response) {
     });
     return;
   }
-  requestUrl.pathname = route;
+  const hookEndpoint = codexPatchHookEndpoint(route);
+  requestUrl.pathname = hookEndpoint.pathname;
+  request.codexRouterPatchHookCapability = hookEndpoint.capability;
 
   // Behind the caller capability, like every other local endpoint: the panel
   // reads the same data the tray does, so it is gated the same way.
@@ -5314,14 +5317,21 @@ const server = http.createServer((request, response) => {
 });
 
 server.on("upgrade", (request, socket, head) => {
+  let hookEndpoint = {};
+  try {
+    const requestUrl = new URL(request.url || "/", `http://${request.headers.host || LISTEN_HOST}`);
+    hookEndpoint = codexPatchHookEndpoint(authenticatedCallerRoute(request, requestUrl));
+  } catch {
+    // The shared upgrade handler returns its normal bounded 400/401 response.
+  }
   handleResponsesWebSocketUpgrade(request, socket, head, {
     callerKey: CALLER_KEY,
-    authenticateUpgrade: authenticatedCallerRoute,
+    authenticateUpgrade: () => hookEndpoint.pathname,
     // The WebSocket is an edge translation only. Every complete request
     // re-enters this caller-authenticated HTTP route, so routing, provider
     // credentials, retries, failover, transforms, usage, and cancellation all
     // continue to have one implementation.
-    responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}/responses`,
+    responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}${hookEndpoint.capability ? CODEX_PATCH_HOOK_BASE_PATH.slice(3) : ""}/responses`,
   });
 });
 // Without this an 'error' event is unhandled and the process exits silently.

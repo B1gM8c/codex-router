@@ -9,10 +9,11 @@ export const GROK_PATCH_HOOK_PREFIX = "CODEX_ROUTER_STRUCTURED_PATCH_V1\n";
 export const GROK_PATCH_HOOK_HEADER = "x-codex-router-patch-hook";
 export const GROK_PATCH_HOOK_CAPABILITY = "structured-patch-v1";
 
-export function grokPatchHookEnabled(route, headers, environment = process.env) {
+export function grokPatchHookEnabled(route, headers, environment = process.env, endpointCapability) {
   return route?.slug === "grok-oauth/grok-4.6" &&
     environment.CODEX_ROUTER_GROK_PATCH_HOOK === "1" &&
-    headers?.[GROK_PATCH_HOOK_HEADER] === GROK_PATCH_HOOK_CAPABILITY;
+    (headers?.[GROK_PATCH_HOOK_HEADER] === GROK_PATCH_HOOK_CAPABILITY ||
+     endpointCapability === GROK_PATCH_HOOK_CAPABILITY);
 }
 
 function boundedArguments(input) {
