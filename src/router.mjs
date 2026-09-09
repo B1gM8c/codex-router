@@ -110,6 +110,7 @@ import {
   GROK_STRUCTURED_PATCH_CODEC,
   grokStructuredPatchEnabled,
 } from "./grok-structured-patch.mjs";
+import { GROK_PATCH_HOOK_CODEC, grokPatchHookEnabled } from "./grok-patch-hook-transport.mjs";
 import {
   NamespaceToolCallTransform,
   agentMessagesAsUserMessages,
@@ -3209,18 +3210,21 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
-  const structuredPatch = grokStructuredPatchEnabled(route) &&
+  const patchHook = grokPatchHookEnabled(route, request.headers);
+  const structuredPatch = (patchHook || grokStructuredPatchEnabled(route)) &&
     Array.isArray(tools) && tools.some(
       (tool) => tool?.type === "custom" && tool.name === "apply_patch",
     );
-  if (needsStrictOpenCodeToolCompatibility(route) || structuredPatch) {
+  if (needsStrictOpenCodeToolCompatibility(route) || structuredPatch || patchHook) {
     const customTools = bridgeCustomTools(
       tools,
       routedInput,
       flattenedNamespaces,
       routedToolChoice,
       undefined,
-      structuredPatch
+      patchHook
+        ? { codecs: new Map([["apply_patch", GROK_PATCH_HOOK_CODEC]]) }
+        : structuredPatch
         ? { codecs: new Map([["apply_patch", GROK_STRUCTURED_PATCH_CODEC]]) }
         : consoleGoResponsesCompatibility
         ? { maxNameLength: 64, bridgeAll: true }
@@ -3346,9 +3350,10 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     flattenedNamespaces,
     grokStructuredPatch: route.slug === "grok-oauth/grok-4.6"
       ? {
-          enabled: grokStructuredPatchEnabled(route),
+          enabled: patchHook || grokStructuredPatchEnabled(route),
           applied: structuredPatch,
           schemaVersion: GROK_STRUCTURED_PATCH_CODEC.version,
+          ...(patchHook ? { mode: "client_hook" } : {}),
         }
       : undefined,
     // Close finished children the parent left Working. Only when the

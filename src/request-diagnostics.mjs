@@ -73,7 +73,11 @@ export function sanitizeGrokStructuredPatch(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   if (typeof value.enabled !== "boolean" || typeof value.applied !== "boolean") return undefined;
   if (value.schemaVersion !== 1 || (value.applied && !value.enabled)) return undefined;
-  return { enabled: value.enabled, applied: value.applied, schemaVersion: 1 };
+  if (value.mode !== undefined && value.mode !== "client_hook") return undefined;
+  return {
+    enabled: value.enabled, applied: value.applied, schemaVersion: 1,
+    ...(value.mode === "client_hook" ? { mode: "client_hook" } : {}),
+  };
 }
 
 export function usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch } = {}) {

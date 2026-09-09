@@ -416,11 +416,15 @@ export function bridgeCustomTools(
         bridgedCallIds.add(item.call_id);
       }
       changedInput = true;
+      // A negotiated client adapter may carry its original provider argument
+      // string inside native input. Restore it verbatim, including failed JSON.
+      // History conversion does not register an executable response codec.
+      const historicalArguments = codecs?.get(item.name)?.encodeHistoryInput?.(customInput);
       const routedCall = {
         ...rest,
         type: "function_call",
         name: providerName,
-        arguments: JSON.stringify({ [CUSTOM_TOOL_INPUT_PROPERTY]: customInput }),
+        arguments: historicalArguments ?? JSON.stringify({ [CUSTOM_TOOL_INPUT_PROPERTY]: customInput }),
       };
       SPECIAL_FUNCTION_REFERENCES.add(routedCall);
       return routedCall;
@@ -2103,7 +2107,7 @@ function customToolInput(
   codec,
 ) {
   if (allowPlaceholder && (value === undefined || value === "")) return "";
-  const argumentsText = coerceFunctionCallArguments(value);
+  const argumentsText = codec?.preserveRawArguments === true ? value : coerceFunctionCallArguments(value);
   if (typeof argumentsText !== "string") return undefined;
   if (codec) {
     try {
@@ -2155,7 +2159,7 @@ function rewriteNamespaceFunctionCallItem(
   { allowIncompleteToolSearch = false } = {},
 ) {
   if (!item || item.type !== "function_call") return undefined;
-  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return undefined;
+  if (!rawCodecItem(item, lookups) && !jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return undefined;
   const exactPlainProviderIdentity =
     lookups.identityAliases &&
     item.namespace === undefined &&
@@ -2225,13 +2229,21 @@ function rewriteOutputItems(output, lookups, sessionModel) {
   return changed ? rewritten : undefined;
 }
 
-function embeddedFunctionArgumentsAreUnambiguous(payload) {
+// Only the exact declared client-hook codec defers argument syntax to the
+// native hook. Identity, outer JSON, lifecycle and byte bounds stay enforced.
+function rawCodecItem(item, lookups) {
+  return item?.type === "function_call" && item.namespace === undefined &&
+    lookups?.customCodecs?.get(item.name)?.preserveRawArguments === true;
+}
+
+function embeddedFunctionArgumentsAreUnambiguous(payload, lookups, rawArgumentsDone = false) {
   const safeItem = (item) =>
-    item?.type !== "function_call" ||
+    item?.type !== "function_call" || rawCodecItem(item, lookups) ||
     jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true });
   if (!safeItem(payload?.item)) return false;
   if (
     payload?.type === "response.function_call_arguments.done" &&
+    !rawArgumentsDone &&
     !jsonArgumentsAreUnambiguous(payload.arguments, { allowEmpty: true })
   ) {
     return false;
@@ -2588,7 +2600,7 @@ export class NamespaceToolCallTransform extends Transform {
         this.push(body);
         return;
       }
-      if (!embeddedFunctionArgumentsAreUnambiguous(original)) {
+      if (!embeddedFunctionArgumentsAreUnambiguous(original, this.#lookups)) {
         this.#rejectCodecPassthrough("ambiguous function arguments");
         this.push(body);
         return;
@@ -3614,7 +3626,10 @@ export class NamespaceToolCallTransform extends Transform {
         // convenient when both claims are present and disagree.
         return this.#unsafeSseFrame(frame, "conflicting SSE event and JSON type");
       }
-      if (!embeddedFunctionArgumentsAreUnambiguous(event)) {
+      const rawDoneMatch = event?.type === "response.function_call_arguments.done"
+        ? this.#specialCallForArgumentsEvent(event) : undefined;
+      const rawArgumentsDone = !rawDoneMatch?.reason && rawDoneMatch?.state?.codec?.preserveRawArguments === true;
+      if (!embeddedFunctionArgumentsAreUnambiguous(event, this.#lookups, rawArgumentsDone)) {
         return this.#unsafeSseFrame(frame, "ambiguous function arguments");
       }
       const sourceEvent = event;

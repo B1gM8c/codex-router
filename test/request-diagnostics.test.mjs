@@ -245,3 +245,10 @@ test("structured patch diagnostics distinguish opt-in from application and omit 
     assert.deepEqual(usageDiagnosticMetadata({ grokStructuredPatch: bad }), {});
   }
 });
+
+test("client hook diagnostic mode is optional, constrained, and content-free", () => {
+  const safe = { enabled: true, applied: true, schemaVersion: 1, mode: "client_hook" };
+  assert.deepEqual(sanitizeGrokStructuredPatch({ ...safe, command: "private patch", rawArguments: "private history" }), safe);
+  assert.deepEqual(usageDiagnosticMetadata({ grokStructuredPatch: safe }), { grokStructuredPatch: safe });
+  for (const mode of ["private prompt", {}, 1, null]) assert.equal(sanitizeGrokStructuredPatch({ ...safe, mode }), undefined);
+});

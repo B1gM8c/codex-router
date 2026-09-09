@@ -14,6 +14,9 @@ name: Grok apply_patch protocol
       - "src/install-plan.mjs"
       - "src/grok-apply-patch-guidance.mjs"
       - "src/grok-structured-patch.mjs"
+      - "src/grok-patch-hook*.mjs"
+      - "scripts/grok-patch-hook.mjs"
+      - "test/grok-patch-hook*.test.mjs"
       - "src/namespace-relay.mjs"
       - "src/grok-oauth-forwarder.mjs"
       - "src/grok-oauth-turn.mjs"
@@ -28,6 +31,9 @@ name: Grok apply_patch protocol
       - "src/install-plan.mjs"
       - "src/grok-apply-patch-guidance.mjs"
       - "src/grok-structured-patch.mjs"
+      - "src/grok-patch-hook*.mjs"
+      - "scripts/grok-patch-hook.mjs"
+      - "test/grok-patch-hook*.test.mjs"
       - "src/namespace-relay.mjs"
       - "src/grok-oauth-forwarder.mjs"
       - "src/grok-oauth-turn.mjs"
@@ -119,3 +125,4 @@ jobs:
           fi
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python"
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --structured
+          node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook

@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { GROK_PATCH_HOOK_PREFIX, GROK_PATCH_HOOK_HEADER, GROK_PATCH_HOOK_CAPABILITY } from "../src/grok-patch-hook-transport.mjs";
 import { callerBaseUrl } from "../src/caller-auth.mjs";
 import { GROK_STRUCTURED_PATCH_CODEC, serializeStructuredPatch } from "../src/grok-structured-patch.mjs";
 import {
@@ -897,12 +898,14 @@ async function scenario(
     jsonBody = gatewayJsonBody,
     requestPayload = routedRequestPayload,
     routerEnv = {},
+    requestHeaders = {},
     prepareRouterEnv,
     visionJsonBody,
     expectedStatus = 200,
   } = {},
 ) {
   const gatewayBodies = [];
+  const gatewayHeaders = [];
   const visionBodies = [];
   const gateway = await mockServer(async (request, response) => {
     if (request.url === "/vision/v1/chat/completions" && visionJsonBody) {
@@ -918,6 +921,7 @@ async function scenario(
     if (request.url === "/v1/responses") {
       const gatewayBody = await bodyJson(request);
       gatewayBodies.push(gatewayBody);
+      gatewayHeaders.push(request.headers);
       if (gatewayBody.stream === false) {
         json(response, 200, jsonBody(gatewayBody));
         return;
@@ -950,12 +954,13 @@ async function scenario(
       headers: {
         Authorization: "Bearer CODEX_CALLER_SECRET",
         "Content-Type": "application/json",
+        ...requestHeaders,
       },
       body: JSON.stringify(requestPayload(stream, model)),
     });
     assert.equal(response.status, expectedStatus, `router status ${response.status}`);
     const clientBody = await response.text();
-    return { gatewayBodies, visionBodies, clientBody, router, status: response.status };
+    return { gatewayBodies, gatewayHeaders, visionBodies, clientBody, router, status: response.status };
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
@@ -2474,4 +2479,57 @@ test("the enabled flag leaves another route and undeclared native patch requests
   });
   assert.equal(undeclared.gatewayBodies[0].tools.some((tool) => tool.parameters?.properties?.operations), false);
   assert.equal(undeclared.gatewayBodies[0].input.find((item) => item.call_id === "call_history").type, "custom_tool_call");
+});
+
+test("negotiated hook crosses real Router with exact raw history and native framing", async () => {
+  for (const stream of [false, true]) {
+    const raw = ' \n{"operations":[],"number":1.0,"escaped":"\\u0061","unicode":"🧙"}\n';
+    const result = await scenario(stream, {
+      model: "grok-oauth/grok-4.6",
+      routerEnv: { CODEX_ROUTER_GROK_PATCH_HOOK: "1" },
+      requestHeaders: { [GROK_PATCH_HOOK_HEADER]: GROK_PATCH_HOOK_CAPABILITY },
+      requestPayload: (stream, model) => {
+        const payload = grokApplyPatchPayload(stream, model);
+        payload.input[1].input = GROK_PATCH_HOOK_PREFIX + raw;
+        payload.input[2].output = "Native hook denied invalid arguments";
+        payload.tool_choice = { type: "custom", name: "apply_patch" };
+        return payload;
+      },
+      jsonBody: body => ({ output: [{ ...structuredPatchCall(body), arguments: raw }] }),
+      sseBody: body => {
+        const call = { ...structuredPatchCall(body), arguments: raw };
+        return sseEvent({ type: "response.output_item.done", item: call }) + sseEvent({ type: "response.completed", response: { output: [call] } });
+      },
+    });
+    assert.equal(result.gatewayBodies.length, 1);
+    assert.equal(result.gatewayHeaders[0][GROK_PATCH_HOOK_HEADER], undefined, "client capability must not leak to provider");
+    const outgoing = result.gatewayBodies[0];
+    const declared = outgoing.tools.find(t => t.parameters?.properties?.operations);
+    assert.ok(declared);
+    assert.notEqual(declared.name, "apply_patch");
+    assert.equal(outgoing.input.find(i => i.call_id === "call_history").arguments, raw);
+    assert.deepEqual(outgoing.tool_choice, { type: "function", name: declared.name });
+    assert.deepEqual(outgoing.input.find(i => i.type === "function_call_output"), { type: "function_call_output", call_id: "call_history", output: "Native hook denied invalid arguments" });
+    const items = stream ? responseItemsFromSse(result.clientBody) : JSON.parse(result.clientBody).output;
+    assert.deepEqual(items.filter(i => i.call_id === "call_structured").at(-1), { type: "custom_tool_call", id: "fc_structured", call_id: "call_structured", name: "apply_patch", input: GROK_PATCH_HOOK_PREFIX + raw });
+  }
+});
+
+test("real Router requires both hook opt-ins and exact model, without affecting v2", async () => {
+  for (const [model, flag, declaration, old] of [
+    ["grok-oauth/grok-4.6", "1", undefined, false],
+    ["grok-oauth/grok-4.6", "0", GROK_PATCH_HOOK_CAPABILITY, false],
+    ["grok-oauth/grok-4.6", "1", "structured-patch-v2", false],
+    ["grok-oauth/grok-4.5", "1", GROK_PATCH_HOOK_CAPABILITY, false],
+    ["grok-oauth/grok-4.6", "1", undefined, true],
+  ]) {
+    const result = await scenario(false, {
+      model, routerEnv: { CODEX_ROUTER_GROK_PATCH_HOOK: flag, CODEX_ROUTER_GROK_STRUCTURED_PATCH: old ? "1" : "0" },
+      requestHeaders: declaration ? { [GROK_PATCH_HOOK_HEADER]: declaration } : {},
+      requestPayload: grokApplyPatchPayload,
+      jsonBody: body => ({ output: old ? [structuredPatchCall(body)] : [] }),
+    });
+    assert.equal(result.gatewayBodies[0].tools.some(t => t.parameters?.properties?.operations), old);
+    if (old) assert.equal(JSON.parse(result.clientBody).output[0].input, serializeStructuredPatch(STRUCTURED_OPERATIONS));
+  }
 });

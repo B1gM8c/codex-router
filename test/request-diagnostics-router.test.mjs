@@ -297,7 +297,7 @@ test("a non-Grok-4.6 turn still records requestId and omits contextBytes", async
   }
 });
 
-test("actual routed usage records structured patch version and application without payload content", async () => {
+for (const hookMode of [false, true]) test(`actual routed usage records ${hookMode ? "hook" : "structured patch"} version and application without payload content`, async () => {
   const gateway = await mockServer(async (request, response) => {
     if (request.method === "GET") return json(response, 200, { ok: true, credential_present: true });
     await bodyJson(request);
@@ -308,18 +308,19 @@ test("actual routed usage records structured patch version and application witho
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
-    CODEX_ROUTER_GROK_STRUCTURED_PATCH: "1",
+    CODEX_ROUTER_GROK_STRUCTURED_PATCH: hookMode ? "0" : "1",
+    CODEX_ROUTER_GROK_PATCH_HOOK: hookMode ? "1" : "0",
   });
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
     for (const applied of [true, false]) {
       const response = await fetch(`${routerBase(routerPort)}/responses`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json", ...(hookMode ? { "x-codex-router-patch-hook": "structured-patch-v1" } : {}) },
         body: JSON.stringify({ ...GROK_PAYLOAD, tools: applied ? [{ type: "custom", name: "apply_patch", description: "private tool description" }] : GROK_PAYLOAD.tools }),
       });
       assert.equal(response.status, 200, await response.text());
       const events = await waitForUsageEvents(router.stateDir, applied ? 1 : 2, router);
-      assert.deepEqual(events.at(-1).grokStructuredPatch, { enabled: true, applied, schemaVersion: 1 });
+      assert.deepEqual(events.at(-1).grokStructuredPatch, { enabled: true, applied, schemaVersion: 1, ...(hookMode ? { mode: "client_hook" } : {}) });
     }
     const raw = readFileSync(path.join(router.stateDir, "usage-events.jsonl"), "utf8");
     assert.equal(raw.includes("private tool description"), false);
