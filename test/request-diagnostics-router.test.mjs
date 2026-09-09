@@ -296,3 +296,37 @@ test("a non-Grok-4.6 turn still records requestId and omits contextBytes", async
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("actual routed usage records structured patch version and application without payload content", async () => {
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET") return json(response, 200, { ok: true, credential_present: true });
+    await bodyJson(request);
+    json(response, 200, { id: "resp_diagnostic", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] });
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_STRUCTURED_PATCH: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const applied of [true, false]) {
+      const response = await fetch(`${routerBase(routerPort)}/responses`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...GROK_PAYLOAD, tools: applied ? [{ type: "custom", name: "apply_patch", description: "private tool description" }] : GROK_PAYLOAD.tools }),
+      });
+      assert.equal(response.status, 200, await response.text());
+      const events = await waitForUsageEvents(router.stateDir, applied ? 1 : 2, router);
+      assert.deepEqual(events.at(-1).grokStructuredPatch, { enabled: true, applied, schemaVersion: 1 });
+    }
+    const raw = readFileSync(path.join(router.stateDir, "usage-events.jsonl"), "utf8");
+    assert.equal(raw.includes("private tool description"), false);
+    assert.equal(raw.includes("Stay concise."), false);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(router.stateDir, { recursive: true, force: true });
+  }
+});

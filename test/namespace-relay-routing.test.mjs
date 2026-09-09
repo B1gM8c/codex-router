@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { callerBaseUrl } from "../src/caller-auth.mjs";
+import { GROK_STRUCTURED_PATCH_CODEC, serializeStructuredPatch } from "../src/grok-structured-patch.mjs";
 import {
   APPLY_PATCH_TOOL_NAME,
   GROK_APPLY_PATCH_CREATE_EXAMPLE,
@@ -2392,4 +2393,85 @@ test("Grok 4.6 OAuth annotates native custom apply_patch and leaves history, col
     definition: GROK_V4A_GRAMMAR,
   });
   assert.equal(control.description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), false);
+});
+
+const STRUCTURED_OPERATIONS = {
+  operations: [{ op: "add", path: 'café "quotes".txt', lines: ["hello “unicode”"] }],
+};
+function structuredPatchCall(body) {
+  const tool = body.tools.find((tool) => tool.parameters?.properties?.operations);
+  assert.ok(tool, "the Router must declare the structured tool to the gateway");
+  return {
+    type: "function_call", id: "fc_structured", call_id: "call_structured",
+    name: tool.name, arguments: JSON.stringify(STRUCTURED_OPERATIONS),
+  };
+}
+function structuredPatchSse(body) {
+  const call = structuredPatchCall(body);
+  return [
+    sseEvent({ type: "response.output_item.added", output_index: 0, item: { ...call, arguments: "" } }),
+    sseEvent({ type: "response.function_call_arguments.delta", item_id: call.id, output_index: 0, delta: call.arguments }),
+    sseEvent({ type: "response.function_call_arguments.done", item_id: call.id, output_index: 0, arguments: call.arguments }),
+    sseEvent({ type: "response.output_item.done", output_index: 0, item: call }),
+    sseEvent({ type: "response.completed", response: { output: [call] } }),
+    "data: [DONE]\n\n",
+  ].join("");
+}
+
+test("Grok structured patch opt-in crosses the real Router with collision, choice and historical identity intact", async () => {
+  for (const stream of [true, false]) {
+    const result = await scenario(stream, {
+      model: "grok-oauth/grok-4.6",
+      routerEnv: { CODEX_ROUTER_GROK_STRUCTURED_PATCH: "1" },
+      requestPayload: (stream, model) => ({ ...grokApplyPatchPayload(stream, model), tool_choice: { type: "custom", name: "apply_patch" } }),
+      sseBody: structuredPatchSse,
+      jsonBody: (body) => ({ id: "response_structured", output: [structuredPatchCall(body)] }),
+    });
+    assert.equal(result.gatewayBodies.length, 1, "one request, no hidden model retry");
+    const outgoing = result.gatewayBodies[0];
+    const tool = outgoing.tools.find((tool) => tool.parameters?.properties?.operations);
+    assert.deepEqual(tool.parameters, GROK_STRUCTURED_PATCH_CODEC.parameters);
+    assert.notEqual(tool.name, "apply_patch", "ordinary same-name function keeps its name");
+    assert.equal(outgoing.tools.find((tool) => tool.name === "apply_patch").description, "ordinary same-name function");
+    assert.deepEqual(outgoing.tools.find((tool) => tool.name === "future_custom"), { type: "custom", name: "future_custom", description: "leave me" });
+    assert.deepEqual(outgoing.tool_choice, { type: "function", name: tool.name });
+    const old = outgoing.input.find((item) => item.call_id === "call_history");
+    assert.equal(old.name, tool.name);
+    assert.equal(old.id, "ctc_history");
+    assert.equal(JSON.parse(old.arguments).input, grokApplyPatchPayload(stream, outgoing.model).input[1].input);
+    assert.deepEqual(outgoing.input.find((item) => item.type === "function_call_output"), { type: "function_call_output", call_id: "call_history", output: "Done!" });
+    const items = stream ? responseItemsFromSse(result.clientBody) : JSON.parse(result.clientBody).output;
+    const restored = items.filter((item) => item.call_id === "call_structured").at(-1);
+    assert.deepEqual(restored, { type: "custom_tool_call", id: "fc_structured", call_id: "call_structured", name: "apply_patch", input: serializeStructuredPatch(STRUCTURED_OPERATIONS) });
+    assert.equal(result.clientBody.includes('"operations"'), false);
+  }
+});
+
+test("the enabled flag leaves another route and undeclared native patch requests unchanged", async () => {
+  const control = await scenario(true, {
+    model: "grok-oauth/grok-4.5",
+    routerEnv: { CODEX_ROUTER_GROK_STRUCTURED_PATCH: "1" },
+    requestPayload: grokApplyPatchPayload,
+    sseBody: grokApplyPatchSseBody,
+  });
+  const disabled = await scenario(true, {
+    model: "grok-oauth/grok-4.5",
+    routerEnv: { CODEX_ROUTER_GROK_STRUCTURED_PATCH: "0" },
+    requestPayload: grokApplyPatchPayload,
+    sseBody: grokApplyPatchSseBody,
+  });
+  assert.deepEqual(control.gatewayBodies, disabled.gatewayBodies);
+  assert.equal(control.clientBody, disabled.clientBody);
+  const undeclared = await scenario(false, {
+    model: "grok-oauth/grok-4.6",
+    routerEnv: { CODEX_ROUTER_GROK_STRUCTURED_PATCH: "1" },
+    requestPayload: (stream, model) => {
+      const payload = grokApplyPatchPayload(stream, model);
+      payload.tools = payload.tools.filter((tool) => tool.type !== "custom" || tool.name !== "apply_patch");
+      return payload;
+    },
+    jsonBody: () => ({ id: "response_no_patch", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] }),
+  });
+  assert.equal(undeclared.gatewayBodies[0].tools.some((tool) => tool.parameters?.properties?.operations), false);
+  assert.equal(undeclared.gatewayBodies[0].input.find((item) => item.call_id === "call_history").type, "custom_tool_call");
 });

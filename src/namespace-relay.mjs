@@ -55,6 +55,7 @@ const MCP_NAMESPACE_PREFIX = "mcp__";
 const SPAWN_AGENT_MODELS = new WeakMap();
 const TOOL_SEARCH_RELAYS = new WeakMap();
 const CUSTOM_TOOL_RELAYS = new WeakMap();
+const CUSTOM_TOOL_CODECS = new WeakMap();
 const NAME_ALIASES = new WeakMap();
 const PLAIN_TOOL_NAMES = new WeakMap();
 // A provider-facing function reference can retain the same spelling as a
@@ -283,7 +284,7 @@ export function bridgeCustomTools(
   namespaces,
   toolChoice,
   names = ["apply_patch"],
-  { maxNameLength, bridgeAll = false } = {},
+  { maxNameLength, bridgeAll = false, codecs } = {},
 ) {
   if (!(namespaces instanceof Map)) {
     return { tools, input, toolChoice, bridged: false };
@@ -324,6 +325,7 @@ export function bridgeCustomTools(
   const visibleNames = providerVisibleToolNames(ordinaryTools);
   const nativeToProvider = new Map();
   const providerToNative = new Map();
+  const providerCodecs = new Map();
   for (const nativeName of nativeNames) {
     const availableName = availableCustomToolName(nativeName, visibleNames);
     const providerName = Number.isInteger(maxNameLength)
@@ -336,8 +338,15 @@ export function bridgeCustomTools(
     visibleNames.add(providerName);
     nativeToProvider.set(nativeName, providerName);
     providerToNative.set(providerName, nativeName);
+    // History/forced choice alone never grants a codec-backed tool. It must
+    // be a native custom tool declared in this exact client request.
+    if (
+      codecs instanceof Map && codecs.has(nativeName) &&
+      tools?.some((tool) => tool?.type === "custom" && tool.name === nativeName)
+    ) providerCodecs.set(providerName, codecs.get(nativeName));
   }
   CUSTOM_TOOL_RELAYS.set(namespaces, providerToNative);
+  CUSTOM_TOOL_CODECS.set(namespaces, providerCodecs);
 
   let changedTools = false;
   const routedTools = Array.isArray(tools)
@@ -346,12 +355,13 @@ export function bridgeCustomTools(
           tool?.type === "custom" ? nativeToProvider.get(tool.name) : undefined;
         if (!providerName) return tool;
         changedTools = true;
-        const description = bridgedCustomToolDescription(tool);
+        const codec = providerCodecs.get(providerName);
+        const description = codec ? codec.description(tool.description) : bridgedCustomToolDescription(tool);
         return {
           type: "function",
           name: providerName,
           ...(description ? { description } : {}),
-          parameters: {
+          parameters: codec?.parameters ?? {
             type: "object",
             properties: {
               [CUSTOM_TOOL_INPUT_PROPERTY]: {
@@ -2008,6 +2018,7 @@ export function buildNamespaceLookups(namespaces) {
     spawnAgentModels: SPAWN_AGENT_MODELS.get(namespaces),
     toolSearch: TOOL_SEARCH_RELAYS.get(namespaces),
     customTools: CUSTOM_TOOL_RELAYS.get(namespaces),
+    customCodecs: CUSTOM_TOOL_CODECS.get(namespaces),
   };
 }
 
@@ -2089,10 +2100,18 @@ function customToolInput(
   value,
   allowPlaceholder = false,
   property = CUSTOM_TOOL_INPUT_PROPERTY,
+  codec,
 ) {
   if (allowPlaceholder && (value === undefined || value === "")) return "";
   const argumentsText = coerceFunctionCallArguments(value);
   if (typeof argumentsText !== "string") return undefined;
+  if (codec) {
+    try {
+      return codec.decodeArguments(argumentsText);
+    } catch {
+      return undefined;
+    }
+  }
   if (!jsonArgumentsAreUnambiguous(argumentsText)) return undefined;
   try {
     const parsed = JSON.parse(argumentsText);
@@ -2112,7 +2131,7 @@ function rewriteCustomToolFunctionCallItem(item, lookups, allowPlaceholder) {
   }
   const nativeName = lookups.customTools.get(item.name);
   if (!nativeName) return undefined;
-  const input = customToolInput(item.arguments, allowPlaceholder);
+  const input = customToolInput(item.arguments, allowPlaceholder, CUSTOM_TOOL_INPUT_PROPERTY, lookups.customCodecs?.get(item.name));
   if (input === undefined) return undefined;
   const {
     type: _type,
@@ -2428,6 +2447,7 @@ export class NamespaceToolCallTransform extends Transform {
   #maxTrackedStateBytes;
   #rewriteDisabled = false;
   #semanticMutationCommitted = false;
+  #requiresCodec = false;
   #lookups;
   #sessionModel;
   #pendingInterrupts;
@@ -2458,6 +2478,7 @@ export class NamespaceToolCallTransform extends Transform {
     // must not run the namespace rewrites (they exist for routed providers)
     // or re-serialize model-authored events it did not change.
     this.#injectOnly = Boolean(options.injectOnly);
+    this.#requiresCodec = !this.#injectOnly && this.#lookups.customCodecs?.size > 0;
     this.#maxJsonCaptureBytes =
       Number.isInteger(options.maxJsonCaptureBytes) && options.maxJsonCaptureBytes > 0
         ? options.maxJsonCaptureBytes
@@ -2549,11 +2570,13 @@ export class NamespaceToolCallTransform extends Transform {
         return;
       }
       if (!isUtf8(body)) {
+        this.#rejectCodecPassthrough("invalid UTF-8 JSON response");
         this.push(body);
         return;
       }
       const text = body.toString("utf8");
       if (!jsonIsUnambiguousForRewrite(text)) {
+        this.#rejectCodecPassthrough("ambiguous or invalid JSON response");
         this.push(body);
         return;
       }
@@ -2561,10 +2584,12 @@ export class NamespaceToolCallTransform extends Transform {
       try {
         original = JSON.parse(text);
       } catch {
+        this.#rejectCodecPassthrough("invalid JSON response");
         this.push(body);
         return;
       }
       if (!embeddedFunctionArgumentsAreUnambiguous(original)) {
+        this.#rejectCodecPassthrough("ambiguous function arguments");
         this.push(body);
         return;
       }
@@ -2576,6 +2601,14 @@ export class NamespaceToolCallTransform extends Transform {
           this.#sessionModel,
         );
         if (rewritten) payload = rewritten;
+      }
+      if (this.#requiresCodec) {
+        const reason = this.#validateOutputItems(original, payload, { allowAtomic: true });
+        if (reason) this.#rejectCodecPassthrough(reason);
+        if (original?.item) {
+          const itemReason = this.#registerAtomicOutputItem(original.item, payload.item);
+          if (itemReason) this.#rejectCodecPassthrough(itemReason);
+        }
       }
       payload = this.#injectJsonInterrupts(payload);
       // Parsing is only permission to inspect. A response the transform did
@@ -2597,7 +2630,7 @@ export class NamespaceToolCallTransform extends Transform {
       tailSeparator = this.#separatorAfterSseTail(tail);
     }
     if (!this.#rewriteDisabled && this.#hasOpenSpecialCalls()) {
-      if (this.#semanticMutationCommitted) {
+      if (this.#semanticMutationCommitted || this.#requiresCodec) {
         throw new NamespaceRelayCommittedStreamError("unterminated special tool call");
       }
       this.#disableSseRewriting();
@@ -2638,6 +2671,7 @@ export class NamespaceToolCallTransform extends Transform {
       this.#pendingBytes += copied;
       offset += copied;
       if (this.#pendingBytes > this.#maxJsonCaptureBytes) {
+        this.#rejectCodecPassthrough("JSON response byte limit");
         for (let index = 0; index < this.#pendingParts.length; index += 1) {
           const part = this.#pendingParts[index];
           this.push(
@@ -2791,7 +2825,7 @@ export class NamespaceToolCallTransform extends Transform {
     }
     if (this.#sseBytes <= frameByteLimit) return true;
     const buffered = this.#takeSseFrame();
-    if (this.#semanticMutationCommitted) {
+    if (this.#semanticMutationCommitted || this.#requiresCodec) {
       throw new NamespaceRelayCommittedStreamError("SSE frame byte limit");
     }
     this.#disableSseRewriting();
@@ -2892,11 +2926,23 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   #unsafeSseFrame(frame, reason) {
-    if (this.#semanticMutationCommitted) {
+    if (this.#semanticMutationCommitted || this.#requiresCodec) {
       throw new NamespaceRelayCommittedStreamError(reason);
     }
     this.#disableSseRewriting();
     return [frame];
+  }
+
+  #rejectCodecPassthrough(reason) {
+    if (this.#requiresCodec) throw new NamespaceRelayCommittedStreamError(reason);
+  }
+
+  #nativeCodecBypass(item) {
+    if (!this.#requiresCodec || item?.type !== "custom_tool_call") return false;
+    for (const [providerName, nativeName] of this.#lookups.customTools) {
+      if (nativeName === item.name && this.#lookups.customCodecs.has(providerName)) return true;
+    }
+    return false;
   }
 
   #disableSseRewriting() {
@@ -2960,6 +3006,7 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   #registerCall(sourceItem, item) {
+    if (this.#nativeCodecBypass(sourceItem)) return "structured tool bypassed its declared codec";
     const kind = this.#specialCallKind(item);
     const sourceKind = this.#sourceSpecialCallKind(sourceItem);
     if ((sourceKind || kind) && sourceKind !== kind) {
@@ -3021,7 +3068,20 @@ export class NamespaceToolCallTransform extends Transform {
               invalid: false,
             }
           : undefined,
+      codec: sourceItem?.type === "function_call" ? this.#lookups.customCodecs?.get(sourceItem.name) : undefined,
+      codecSourceHash: undefined,
+      codecSourceCharacters: 0,
+      codecSourceSeen: false,
+      codecFinalLength: undefined,
+      codecFinalDigest: undefined,
+      codecOpening: undefined,
     };
+    if (state.codec) {
+      state.codecSourceHash = createHash("sha256");
+      if (typeof sourceItem.arguments === "string" && sourceItem.arguments) {
+        state.codecOpening = stringFingerprint(sourceItem.arguments);
+      }
+    }
     return this.#storeCallState(state);
   }
 
@@ -3030,6 +3090,7 @@ export class NamespaceToolCallTransform extends Transform {
   // a closed lifecycle, but reserve its identities exactly like a streamed
   // opening so later events cannot change owners or replay it.
   #registerAtomicSpecialCall(sourceItem, item, { summarySeen = false } = {}) {
+    if (this.#nativeCodecBypass(sourceItem)) return "structured tool bypassed its declared codec";
     const sourceKind = this.#sourceSpecialCallKind(sourceItem);
     const kind = this.#specialCallKind(item);
     if (!sourceKind || sourceKind !== kind) {
@@ -3066,7 +3127,7 @@ export class NamespaceToolCallTransform extends Transform {
         const expectedName = this.#lookups.customTools?.get(sourceItem.name);
         if (
           expectedName !== item.name ||
-          customToolInput(sourceItem.arguments) !== item.input
+          customToolInput(sourceItem.arguments, false, CUSTOM_TOOL_INPUT_PROPERTY, this.#lookups.customCodecs?.get(sourceItem.name)) !== item.input
         ) {
           return "atomic custom tool call was not restored consistently";
         }
@@ -3110,6 +3171,8 @@ export class NamespaceToolCallTransform extends Transform {
     const finalArgumentsFingerprint = kind === "tool_search"
       ? canonicalJsonFingerprint(item.arguments)
       : undefined;
+    const codec = sourceItem.type === "function_call" ? this.#lookups.customCodecs?.get(sourceItem.name) : undefined;
+    const codecFingerprint = codec ? stringFingerprint(sourceItem.arguments) : undefined;
     const state = {
       kind,
       itemId,
@@ -3131,6 +3194,9 @@ export class NamespaceToolCallTransform extends Transform {
       closed: true,
       summarySeen,
       deltaState: undefined,
+      codec,
+      codecFinalLength: codecFingerprint?.length,
+      codecFinalDigest: codecFingerprint?.digest,
     };
     return this.#storeCallState(state);
   }
@@ -3243,7 +3309,8 @@ export class NamespaceToolCallTransform extends Transform {
       return { reason: "conflicting special tool call identity" };
     }
     const state = byItemId || byCallId;
-    if (!state || !state.kind) return {};
+    if (!state) return this.#requiresCodec ? { reason: "arguments without a known output item" } : {};
+    if (!state.kind) return {};
     if (event.item_id !== state.itemId) {
       return { reason: "mismatched special tool call item id" };
     }
@@ -3255,6 +3322,7 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   #customDeltaMismatch(state, inputFingerprint) {
+    if (state.codec) return undefined; // Source JSON is checked separately; no patch delta was emitted.
     if (!state.sawArgumentDelta) return undefined;
     if (
       state.deltaState.invalid ||
@@ -3271,6 +3339,30 @@ export class NamespaceToolCallTransform extends Transform {
     return streamed.equals(inputFingerprint.digest)
       ? undefined
       : "custom tool argument deltas disagree with completed input";
+  }
+
+  #validateCodecSource(state, argumentsText) {
+    if (!state.codec) return undefined;
+    if (typeof argumentsText !== "string" || Buffer.byteLength(argumentsText, "utf8") > state.codec.maxArgumentBytes) {
+      return "invalid or oversized structured arguments";
+    }
+    const fingerprint = stringFingerprint(argumentsText);
+    if (state.codecOpening && !fingerprintMatches(fingerprint, state.codecOpening.length, state.codecOpening.digest)) {
+      return "structured arguments changed after opening";
+    }
+    if (state.codecFinalDigest) {
+      return fingerprintMatches(fingerprint, state.codecFinalLength, state.codecFinalDigest)
+        ? undefined : "structured arguments changed after completion";
+    }
+    if (state.codecSourceSeen && (
+      state.codecSourceCharacters !== fingerprint.length ||
+      !state.codecSourceHash.copy().digest().equals(fingerprint.digest)
+    )) return "structured argument deltas disagree with completed arguments";
+    state.codecFinalLength = fingerprint.length;
+    state.codecFinalDigest = fingerprint.digest;
+    state.codecSourceHash = undefined;
+    state.codecOpening = undefined;
+    return undefined;
   }
 
   #closeOutputItem(sourceItem, item) {
@@ -3302,6 +3394,8 @@ export class NamespaceToolCallTransform extends Transform {
       return undefined;
     }
     if (state.kind === "custom") {
+      const codecReason = this.#validateCodecSource(state, sourceItem.arguments);
+      if (codecReason) return codecReason;
       if (typeof item.input !== "string") {
         return "custom tool call input changed before close";
       }
@@ -3391,6 +3485,8 @@ export class NamespaceToolCallTransform extends Transform {
       return undefined;
     }
     if (state.kind === "custom") {
+      const codecReason = this.#validateCodecSource(state, sourceItem.arguments);
+      if (codecReason) return codecReason;
       if (typeof item.input !== "string") {
         return "custom tool call summary input changed after close";
       }
@@ -3556,6 +3652,19 @@ export class NamespaceToolCallTransform extends Transform {
             this.#commitSemanticMutation();
             return [];
           }
+          if (matched.state.codec) {
+            // Hash the original JSON incrementally instead of retaining it or
+            // interpreting partial operations as executable patch text.
+            if (typeof event.delta !== "string") return this.#unsafeSseFrame(frame, "invalid structured argument delta");
+            matched.state.codecSourceSeen = true;
+            matched.state.codecSourceCharacters += event.delta.length;
+            if (matched.state.codecSourceCharacters > matched.state.codec.maxArgumentBytes) {
+              return this.#unsafeSseFrame(frame, "structured argument delta limit");
+            }
+            matched.state.codecSourceHash.update(Buffer.from(event.delta, "utf16le"));
+            this.#commitSemanticMutation();
+            return [];
+          }
           matched.state.sawArgumentDelta = true;
           const argumentProperty =
             matched.state.sourceType === "custom_tool_call"
@@ -3606,10 +3715,12 @@ export class NamespaceToolCallTransform extends Transform {
             matched.state.sourceType === "custom_tool_call"
               ? LITELLM_CUSTOM_TOOL_INPUT_PROPERTY
               : CUSTOM_TOOL_INPUT_PROPERTY;
-          const input = customToolInput(event.arguments, false, argumentProperty);
+          const input = customToolInput(event.arguments, false, argumentProperty, matched.state.codec);
           if (input === undefined) {
             return this.#unsafeSseFrame(frame, "invalid custom tool arguments done");
           }
+          const codecReason = this.#validateCodecSource(matched.state, event.arguments);
+          if (codecReason) return this.#unsafeSseFrame(frame, codecReason);
           const inputFingerprint = stringFingerprint(input);
           const deltaReason = this.#customDeltaMismatch(
             matched.state,

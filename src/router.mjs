@@ -107,6 +107,10 @@ import {
 import { fetchWithRetry } from "./upstream-retry.mjs";
 import { applyGrokApplyPatchGuidance } from "./grok-apply-patch-guidance.mjs";
 import {
+  GROK_STRUCTURED_PATCH_CODEC,
+  grokStructuredPatchEnabled,
+} from "./grok-structured-patch.mjs";
+import {
   NamespaceToolCallTransform,
   agentMessagesAsUserMessages,
   bridgeCustomTools,
@@ -3205,14 +3209,20 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
-  if (needsStrictOpenCodeToolCompatibility(route)) {
+  const structuredPatch = grokStructuredPatchEnabled(route) &&
+    Array.isArray(tools) && tools.some(
+      (tool) => tool?.type === "custom" && tool.name === "apply_patch",
+    );
+  if (needsStrictOpenCodeToolCompatibility(route) || structuredPatch) {
     const customTools = bridgeCustomTools(
       tools,
       routedInput,
       flattenedNamespaces,
       routedToolChoice,
       undefined,
-      consoleGoResponsesCompatibility
+      structuredPatch
+        ? { codecs: new Map([["apply_patch", GROK_STRUCTURED_PATCH_CODEC]]) }
+        : consoleGoResponsesCompatibility
         ? { maxNameLength: 64, bridgeAll: true }
         : undefined,
     );
@@ -3334,6 +3344,13 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     searchMode: searchCompatibility.searchMode,
     namespacesFlattened,
     flattenedNamespaces,
+    grokStructuredPatch: route.slug === "grok-oauth/grok-4.6"
+      ? {
+          enabled: grokStructuredPatchEnabled(route),
+          applied: structuredPatch,
+          schemaVersion: GROK_STRUCTURED_PATCH_CODEC.version,
+        }
+      : undefined,
     // Close finished children the parent left Working. Only when the
     // collaboration toolset is actually available on this turn.
     pendingInterrupts: pendingInterruptTargets(
@@ -3767,6 +3784,7 @@ async function handleResponses(request, response, requestUrl) {
       route = nextRoute;
       namespacesFlattened = built.namespacesFlattened;
       flattenedNamespaces = built.flattenedNamespaces;
+      diagnostics.grokStructuredPatch = built.grokStructuredPatch;
       pendingInterrupts = built.pendingInterrupts;
       agedInput = built.agedInput;
       toolResultAging = built.toolResultAging;
@@ -3805,6 +3823,7 @@ async function handleResponses(request, response, requestUrl) {
       agedInput = built.agedInput;
       namespacesFlattened = built.namespacesFlattened;
       flattenedNamespaces = built.flattenedNamespaces;
+      diagnostics.grokStructuredPatch = built.grokStructuredPatch;
       pendingInterrupts = built.pendingInterrupts;
       target = built.target;
       headers = built.headers;

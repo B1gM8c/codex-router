@@ -3,6 +3,9 @@ import { jsonArgumentsAreUnambiguous } from "./namespace-relay.mjs";
 // A pure, deliberately limited representation of native apply_patch. This
 // module does not read files, match context, apply edits, or call a provider.
 export const GROK_STRUCTURED_PATCH_VERSION = 1;
+export function grokStructuredPatchEnabled(route, environment = process.env) {
+  return route?.slug === "grok-oauth/grok-4.6" && environment.CODEX_ROUTER_GROK_STRUCTURED_PATCH === "1";
+}
 export const MAX_STRUCTURED_PATCH_BYTES = 1024 * 1024;
 const MAX_OPERATIONS = 128;
 const MAX_HUNKS = 512;
@@ -174,3 +177,16 @@ export const GROK_STRUCTURED_PATCH_PARAMETERS = objectSchema({
     },
   },
 });
+
+export const GROK_STRUCTURED_PATCH_CODEC = {
+  version: GROK_STRUCTURED_PATCH_VERSION,
+  parameters: GROK_STRUCTURED_PATCH_PARAMETERS,
+  maxArgumentBytes: MAX_STRUCTURED_PATCH_BYTES,
+  decodeArguments: compileStructuredPatchArguments,
+  description(original) {
+    return [
+      typeof original === "string" ? original : "Apply a patch to files.",
+      "This provider interface accepts structured operations, not raw patch text. Supply literal logical lines without patch delimiters or line prefixes; use context/add/remove kinds inside update hunks. Codex performs the original patch validation and permission checks. Old calls in history may have an input field containing native patch text; that historical envelope is not accepted for new calls.",
+    ].filter(Boolean).join("\n\n");
+  },
+};
