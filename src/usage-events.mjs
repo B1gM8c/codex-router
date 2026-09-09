@@ -170,9 +170,10 @@ export function recordUsageEvent({
   // Grok OAuth 4.6 ingress UTF-8 JSON byte split. Optional, bounded, and never
   // a token estimate. Missing payload fields measure as zero.
   contextBytes,
+  grokStructuredPatch,
   at = Date.now(),
 }) {
-  const diagnostics = usageDiagnosticMetadata({ requestId, contextBytes });
+  const diagnostics = usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch });
   const event = {
     meteringVersion: 1,
     at: new Date(at).toISOString(),
@@ -487,6 +488,7 @@ export function recentUsageEvents({
         const diagnostics = usageDiagnosticMetadata({
           requestId: event.requestId,
           contextBytes: event.contextBytes,
+          grokStructuredPatch: event.grokStructuredPatch,
         });
         return {
           ...(event.meteringVersion === 1 ? { meteringVersion: 1 } : {}),

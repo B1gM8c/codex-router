@@ -69,11 +69,20 @@ export function sanitizeContextBytes(value) {
   };
 }
 
-export function usageDiagnosticMetadata({ requestId, contextBytes } = {}) {
+export function sanitizeGrokStructuredPatch(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (typeof value.enabled !== "boolean" || typeof value.applied !== "boolean") return undefined;
+  if (value.schemaVersion !== 1 || (value.applied && !value.enabled)) return undefined;
+  return { enabled: value.enabled, applied: value.applied, schemaVersion: 1 };
+}
+
+export function usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch } = {}) {
   const safeRequestId = safeDiagnosticRequestId(requestId);
   const safeContextBytes = sanitizeContextBytes(contextBytes);
+  const safeStructuredPatch = sanitizeGrokStructuredPatch(grokStructuredPatch);
   return {
     ...(safeRequestId ? { requestId: safeRequestId } : {}),
     ...(safeContextBytes ? { contextBytes: safeContextBytes } : {}),
+    ...(safeStructuredPatch ? { grokStructuredPatch: safeStructuredPatch } : {}),
   };
 }

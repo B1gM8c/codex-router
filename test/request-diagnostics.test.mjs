@@ -10,6 +10,7 @@ import {
   ROUTER_INGRESS_OBSERVATION_POINT,
   safeDiagnosticRequestId,
   sanitizeContextBytes,
+  sanitizeGrokStructuredPatch,
   utf8JsonBytes,
   usageDiagnosticMetadata,
 } from "../src/request-diagnostics.mjs";
@@ -122,6 +123,7 @@ test("usage events persist requestId and contextBytes without content leakage", 
       status: 200,
       durationMs: 10,
       requestId: "42",
+      grokStructuredPatch: { enabled: true, applied: true, schemaVersion: 1, prompt: "never persisted" },
       contextBytes: measureIngressContextBytes({
         instructions: "keep this out of the ledger",
         tools: [{ name: "read_file", path: "/secret/notes.md" }],
@@ -134,6 +136,7 @@ test("usage events persist requestId and contextBytes without content leakage", 
     });
     const [event] = usage.recentUsageEvents();
     assert.equal(event.requestId, "42");
+    assert.deepEqual(event.grokStructuredPatch, { enabled: true, applied: true, schemaVersion: 1 });
     assert.deepEqual(event.contextBytes, {
       observationPoint: ROUTER_INGRESS_OBSERVATION_POINT,
       instructionsBytes: utf8JsonBytes("keep this out of the ledger"),
@@ -228,5 +231,17 @@ test("reasoningTokens zero is distinct from an absent count on the ledger", asyn
     if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
     else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
     rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("structured patch diagnostics distinguish opt-in from application and omit arbitrary content", () => {
+  for (const [enabled, applied] of [[false, false], [true, false], [true, true]]) {
+    const safe = { enabled, applied, schemaVersion: 1 };
+    assert.deepEqual(sanitizeGrokStructuredPatch({ ...safe, prompt: "secret", path: "/private" }), safe);
+    assert.deepEqual(usageDiagnosticMetadata({ grokStructuredPatch: safe }), { grokStructuredPatch: safe });
+  }
+  for (const bad of [null, [], "1", {}, { enabled: true, applied: "yes", schemaVersion: 1 }, { enabled: false, applied: true, schemaVersion: 1 }, { enabled: true, applied: true, schemaVersion: 2 }]) {
+    assert.equal(sanitizeGrokStructuredPatch(bad), undefined);
+    assert.deepEqual(usageDiagnosticMetadata({ grokStructuredPatch: bad }), {});
   }
 });
