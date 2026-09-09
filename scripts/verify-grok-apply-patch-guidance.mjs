@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -15,6 +15,15 @@ import {
   GROK_APPLY_PATCH_UPDATE_EXAMPLE,
 } from "../src/grok-apply-patch-guidance.mjs";
 import { spawnableCommand } from "../src/spawnable-command.mjs";
+import { GROK_STRUCTURED_PATCH_CODEC, serializeStructuredPatch } from "../src/grok-structured-patch.mjs";
+import { routedModel } from "../src/catalog.mjs";
+import { MODEL_BY_SLUG } from "../src/model-registry.mjs";
+
+const structured = process.argv.includes("--structured");
+const codexBinary = process.argv.find((arg) => arg.startsWith("--codex="))?.slice("--codex=".length);
+if (codexBinary && !structured) throw new Error("--codex requires --structured");
+const structuredOperations = { operations: [{ op: "add", path: 'café "quotes".txt', lines: ["hello “unicode”"] }] };
+let nativeRecoveryProbe;
 
 const python = process.argv[2] || process.env.LITELLM_PYTHON;
 if (!python) {
@@ -216,7 +225,7 @@ function applyPatchRequest({ historyInput, historyId }) {
   };
 }
 
-function mockFunctionCall(callId, argumentsText) {
+function mockFunctionCall(callId, argumentsText, name = APPLY_PATCH_TOOL_NAME) {
   return sse([
     {
       type: "response.output_item.added",
@@ -224,7 +233,7 @@ function mockFunctionCall(callId, argumentsText) {
         type: "function_call",
         id: `fc_${callId}`,
         call_id: callId,
-        name: APPLY_PATCH_TOOL_NAME,
+        name,
       },
     },
     ...[argumentsText.slice(0, 13), argumentsText.slice(13, 29), argumentsText.slice(29)].map((delta) => ({
@@ -238,7 +247,7 @@ function mockFunctionCall(callId, argumentsText) {
         type: "function_call",
         id: `fc_${callId}`,
         call_id: callId,
-        name: APPLY_PATCH_TOOL_NAME,
+        name,
         arguments: argumentsText,
       },
     },
@@ -254,15 +263,47 @@ const mockXai = http.createServer(async (request, response) => {
     authorizationPresent: Boolean(request.headers.authorization),
     body,
   });
+  const structuredTool = body.tools?.find((tool) => tool.parameters?.properties?.operations);
+  const toolName = structured ? structuredTool?.name : APPLY_PATCH_TOOL_NAME;
+  if (nativeRecoveryProbe) {
+    const probe = nativeRecoveryProbe;
+    probe.requests += 1;
+    if (probe.requests > 3 || !structuredTool) {
+      response.writeHead(500);
+      response.end("Unexpected native probe request");
+      return;
+    }
+    const outputs = (body.input || []).filter((item) => item.type === "function_call_output");
+    probe.contextFailure ||= outputs.some((item) => item.call_id === "call_native_missing" && /Failed to find expected lines/.test(String(item.output)));
+    probe.successFeedback ||= outputs.some((item) => item.call_id === "call_native_repair" && /Success/.test(String(item.output)));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (probe.requests < 3) {
+      const operations = { operations: [{ op: "update", path: "fixture.txt", hunks: [{ lines: [
+        { kind: "remove", text: probe.requests === 1 ? "absent" : "old" },
+        { kind: "add", text: "new" },
+      ] }] }] };
+      response.end(mockFunctionCall(probe.requests === 1 ? "call_native_missing" : "call_native_repair", JSON.stringify(operations), toolName));
+    } else {
+      const item = { type: "message", id: "msg_native_final", role: "assistant", status: "completed", content: [{ type: "output_text", text: "probe complete", annotations: [] }] };
+      response.end(sse([
+        { type: "response.created", response: { id: "resp_native_final", status: "in_progress", output: [] } },
+        { type: "response.output_item.added", output_index: 0, item },
+        { type: "response.output_text.delta", item_id: item.id, output_index: 0, content_index: 0, delta: "probe complete" },
+        { type: "response.output_item.done", output_index: 0, item },
+        { type: "response.completed", response: { id: "resp_native_final", status: "completed", output: [item], usage: { input_tokens: 1, output_tokens: 1 } } },
+      ]));
+    }
+    return;
+  }
   const history = (body.input || []).find(
-    (item) => item?.type === "function_call" && item.name === APPLY_PATCH_TOOL_NAME,
+    (item) => item?.type === "function_call" && item.name === toolName,
   );
   const historyArgs = typeof history?.arguments === "string" ? history.arguments : "";
   const malformed = historyArgs.includes("not-a-json-object");
-  const outgoingArgs = malformed ? historyArgs : JSON.stringify({ content: UNICODE_PATCH });
+  const outgoingArgs = structured ? JSON.stringify(structuredOperations) : malformed ? historyArgs : JSON.stringify({ content: UNICODE_PATCH });
   const callId = malformed ? "call_malformed" : "call_unicode";
   response.writeHead(200, { "Content-Type": "text/event-stream" });
-  response.end(mockFunctionCall(callId, outgoingArgs));
+  response.end(mockFunctionCall(callId, outgoingArgs, toolName));
 });
 
 try {
@@ -323,6 +364,7 @@ try {
     CODEX_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
     CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
     CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY: "0",
+    CODEX_ROUTER_GROK_STRUCTURED_PATCH: structured ? "1" : "0",
     LITELLM_MASTER_KEY: INTERNAL_KEY,
     LITELLM_LOG: "ERROR",
     LITELLM_TELEMETRY: "False",
@@ -406,15 +448,25 @@ try {
   assert.equal(capturedGrok.length, 1);
   const grokRequest = capturedGrok[0].body;
   const grokTools = grokRequest.tools || [];
-  const grokApply = grokTools.filter((tool) => tool.type === "function" && tool.name === APPLY_PATCH_TOOL_NAME);
+  const grokApply = grokTools.filter((tool) => structured
+    ? tool.parameters?.properties?.operations
+    : tool.type === "function" && tool.name === APPLY_PATCH_TOOL_NAME);
   assert.equal(grokApply.length, 1);
   assert.equal(grokApply[0].description.includes("Apply a patch."), true);
-  assert.equal(grokApply[0].description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
-  assert.equal(grokApply[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE), true);
-  assert.equal(grokApply[0].description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE), true);
-  assert.equal(larkFence(grokApply[0].description), V4A_GRAMMAR);
-  assert.deepEqual(grokApply[0].parameters?.required, ["content"]);
-  assert.equal(grokApply[0].parameters?.properties?.path, undefined);
+  if (structured) {
+    assert.deepEqual(grokApply[0].parameters, GROK_STRUCTURED_PATCH_CODEC.parameters);
+    assert.notEqual(grokApply[0].name, APPLY_PATCH_TOOL_NAME);
+    const ordinary = grokTools.find((tool) => tool.name === APPLY_PATCH_TOOL_NAME);
+    assert.equal(ordinary?.description, "ordinary same-name function");
+    assert.deepEqual(ordinary.parameters.properties, { path: { type: "string" } });
+  } else {
+    assert.equal(grokApply[0].description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+    assert.equal(grokApply[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE), true);
+    assert.equal(grokApply[0].description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE), true);
+    assert.equal(larkFence(grokApply[0].description), V4A_GRAMMAR);
+    assert.deepEqual(grokApply[0].parameters?.required, ["content"]);
+    assert.equal(grokApply[0].parameters?.properties?.path, undefined);
+  }
   const readFile = grokTools.find((tool) => tool.type === "function" && tool.name === "read_file");
   assert.equal(readFile?.description, "unrelated ordinary function");
   assert.equal(String(readFile?.description || "").includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), false);
@@ -423,8 +475,8 @@ try {
     (item) => item?.type === "function_call" && item.call_id === "call_history",
   );
   assert.ok(historyCall, "history call_id must survive LiteLLM and the Grok forwarder");
-  assert.equal(historyCall.name, APPLY_PATCH_TOOL_NAME);
-  assert.deepEqual(JSON.parse(historyCall.arguments), { content: HISTORY_PATCH });
+  assert.equal(historyCall.name, grokApply[0].name);
+  assert.deepEqual(JSON.parse(historyCall.arguments), structured ? { input: HISTORY_PATCH } : { content: HISTORY_PATCH });
   const historyResult = (grokRequest.input || []).find(
     (item) => item?.type === "function_call_output" && item.call_id === "call_history",
   );
@@ -432,7 +484,7 @@ try {
 
   const unicodeItem = itemsByCallId(unicodeBody).get("call_unicode");
   assert.equal(unicodeItem?.type, "custom_tool_call");
-  assert.equal(unicodeItem.input, UNICODE_PATCH);
+  assert.equal(unicodeItem.input, structured ? serializeStructuredPatch(structuredOperations) : UNICODE_PATCH);
 
   const malformedBody = await postTurn(
     applyPatchRequest({ historyInput: MALFORMED_PATCH, historyId: "ctc_malformed" }),
@@ -441,10 +493,64 @@ try {
   const malformedHistory = (capturedGrok[1].body.input || []).find(
     (item) => item?.type === "function_call" && item.call_id === "call_history",
   );
-  assert.deepEqual(JSON.parse(malformedHistory.arguments), { content: MALFORMED_PATCH });
+  assert.deepEqual(JSON.parse(malformedHistory.arguments), structured ? { input: MALFORMED_PATCH } : { content: MALFORMED_PATCH });
   const malformedItem = itemsByCallId(malformedBody).get("call_malformed");
   assert.equal(malformedItem?.type, "custom_tool_call");
-  assert.equal(malformedItem.input, MALFORMED_PATCH);
+  assert.equal(malformedItem.input, structured ? serializeStructuredPatch(structuredOperations) : MALFORMED_PATCH);
+  if (codexBinary) {
+    // Offline handler integration only. This separate CLI process is not a
+    // native Desktop benchmark or evidence of benchmark read isolation.
+    const fixtureDir = path.join(workspace, "native-fixture");
+    mkdirSync(fixtureDir);
+    writeFileSync(path.join(fixtureDir, "fixture.txt"), "old\n");
+    // Match the Router's catalog conversion. Unknown-model fallback metadata
+    // does not advertise native apply_patch and cannot exercise this bridge.
+    const bundled = spawnSync(codexBinary, ["debug", "models", "--bundled"], {
+      encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL", maxBuffer: 32 * 1024 * 1024,
+      env: { ...process.env, CODEX_HOME: codexHome },
+    });
+    assert.equal(bundled.status, 0, "read the installed binary's bundled model metadata");
+    const nativeModels = JSON.parse(bundled.stdout).models;
+    const template = nativeModels.find((model) => model.apply_patch_tool_type === "freeform");
+    assert.ok(template, "bundled metadata must provide the native freeform patch tool");
+    const catalogPath = path.join(workspace, "probe-catalog.json");
+    writeFileSync(catalogPath, JSON.stringify({ models: [routedModel(template, MODEL_BY_SLUG.get("grok-oauth/grok-4.6"))] }));
+    nativeRecoveryProbe = { requests: 0, contextFailure: false, successFeedback: false };
+    const args = ["exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check", "--sandbox", "workspace-write", "--color", "never", "--json", "--model", "grok-oauth/grok-4.6", "--cd", fixtureDir, "--disable", "plugins", "--disable", "remote_plugin"];
+    for (const setting of [
+      'model_provider="local-protocol"',
+      `model_catalog_json=${JSON.stringify(catalogPath)}`,
+      'model_providers.local-protocol.name="Offline structured patch proof"',
+      `model_providers.local-protocol.base_url=${JSON.stringify(callerBaseUrl(routerPort, CALLER_KEY))}`,
+      'model_providers.local-protocol.wire_api="responses"',
+      'model_providers.local-protocol.requires_openai_auth=false',
+      'model_providers.local-protocol.supports_websockets=false',
+      'approval_policy="never"',
+      'model_reasoning_effort="high"',
+    ]) args.push("-c", setting);
+    args.push("Offline tool protocol test. Only fixture.txt in this temporary workspace may be edited. Process the supplied tool calls and finish.");
+    const client = spawnChild(codexBinary, args, { CODEX_HOME: codexHome });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // The shared shutdown path escalates to SIGKILL after five seconds;
+      // a client ignoring SIGTERM must not keep the deadline promise pending.
+      void stopChild(client);
+    }, 60_000);
+    const exit = await new Promise((resolve, reject) => {
+      client.once("error", reject);
+      client.once("exit", (code) => resolve(code));
+    }).finally(() => clearTimeout(timer));
+    assert.equal(timedOut, false, "native offline handler probe deadline");
+    if (exit !== 0) {
+      process.stderr.write(`offline probe state: ${JSON.stringify(nativeRecoveryProbe)}\n`);
+      process.stderr.write(`Router: ${routerChild.testOutput()}\nForwarder: ${grokChild.testOutput()}\nLiteLLM: ${litellmChild.testOutput()}\n`);
+    }
+    assert.equal(exit, 0, client.testOutput());
+    assert.deepEqual(nativeRecoveryProbe, { requests: 3, contextFailure: true, successFeedback: true });
+    assert.equal(readFileSync(path.join(fixtureDir, "fixture.txt"), "utf8"), "new\n");
+    process.stdout.write("ok installed Codex workspace-write handler received context failure, then applied repair through the complete local protocol path\n");
+  }
 } finally {
   await Promise.all(children.map((child) => stopChild(child)));
   mockXai.closeAllConnections();
@@ -452,4 +558,4 @@ try {
   rmSync(workspace, { recursive: true, force: true });
 }
 
-process.stdout.write("ok grok apply_patch guidance through Router, LiteLLM, Grok forwarder, and mock xAI\n");
+process.stdout.write(`ok grok apply_patch ${structured ? "structured codec" : "guidance"} through Router, LiteLLM, Grok forwarder, and mock xAI\n`);

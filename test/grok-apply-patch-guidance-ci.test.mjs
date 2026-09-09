@@ -50,6 +50,8 @@ test("the Grok protocol workflow is gated on the guidance path and never skips L
     ...Object.values(INSTALLER_SCRIPTS),
     "src/install-plan.mjs",
     "src/grok-apply-patch-guidance.mjs",
+    "src/grok-structured-patch.mjs",
+    "src/namespace-relay.mjs",
     "src/grok-oauth-forwarder.mjs",
     "src/router.mjs",
     VERIFY,
