@@ -68,9 +68,18 @@ temporary catalog using Router's catalog conversion and the binary's bundled
 metadata. This separate CLI process is an offline handler probe, not a native
 Desktop benchmark or proof of benchmark isolation.
 
-Malformed structured arguments currently abort the transport. They do not
-produce model-visible native tool feedback. Context-error recovery does not
-resolve that limitation. Live provider schema adherence, the complete
-cancellation/replay matrix, benchmark read isolation, and comparative quality
+Optional `--native-fault=disconnect` and `--native-fault=duplicate-close`
+exercise upstream interruption and repeated item completion with a native
+handler. An insertion marker must appear exactly once after the retry or
+normal continuation. The default structured verifier also checks invalid
+arguments without a hidden Router request and client cancellation propagating
+to the mock upstream.
+
+`--native-fault=invalid-arguments` records the observed Codex 0.153.4 recovery
+limitation: the client leaves the fixture unchanged, makes six transport attempts, and fails
+without model-visible native tool feedback. This records a current limitation,
+not successful recovery; a client that changes this behavior fails the negative
+oracle and needs a fresh assessment. Context-error recovery does not resolve it. Live
+provider schema adherence, benchmark read isolation, and comparative quality
 acceptance remain separate gates. Do not enable this mode by default or treat
 passing protocol tests as evidence of faster or better model work.

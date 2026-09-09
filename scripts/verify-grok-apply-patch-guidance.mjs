@@ -22,6 +22,10 @@ import { MODEL_BY_SLUG } from "../src/model-registry.mjs";
 const structured = process.argv.includes("--structured");
 const codexBinary = process.argv.find((arg) => arg.startsWith("--codex="))?.slice("--codex=".length);
 if (codexBinary && !structured) throw new Error("--codex requires --structured");
+const nativeFault = process.argv.find((arg) => arg.startsWith("--native-fault="))?.slice("--native-fault=".length);
+if (nativeFault && (!codexBinary || !["disconnect", "duplicate-close", "invalid-arguments"].includes(nativeFault))) {
+  throw new Error("--native-fault=disconnect|duplicate-close|invalid-arguments requires --codex");
+}
 const structuredOperations = { operations: [{ op: "add", path: 'café "quotes".txt', lines: ["hello “unicode”"] }] };
 let nativeRecoveryProbe;
 
@@ -76,6 +80,7 @@ const MALFORMED_PATCH = "*** Begin Patch\nnot-a-json-object";
 const children = [];
 const workspace = mkdtempSync(path.join(os.tmpdir(), "grok-apply-patch-guidance-"));
 const capturedGrok = [];
+let cancelStreamClosed;
 
 function redact(text) {
   return String(text || "")
@@ -268,21 +273,43 @@ const mockXai = http.createServer(async (request, response) => {
   if (nativeRecoveryProbe) {
     const probe = nativeRecoveryProbe;
     probe.requests += 1;
-    if (probe.requests > 3 || !structuredTool) {
+    if (probe.requests > (nativeFault === "invalid-arguments" ? 6 : 3) || !structuredTool) {
       response.writeHead(500);
       response.end("Unexpected native probe request");
       return;
     }
-    const outputs = (body.input || []).filter((item) => item.type === "function_call_output");
+    const outputs = (body.input || []).filter((item) => item.type === "function_call_output" || item.type === "custom_tool_call_output");
+    if (nativeFault === "invalid-arguments" && outputs.length > 0) probe.invalidArgumentFeedback = true;
     probe.contextFailure ||= outputs.some((item) => item.call_id === "call_native_missing" && /Failed to find expected lines/.test(String(item.output)));
     probe.successFeedback ||= outputs.some((item) => item.call_id === "call_native_repair" && /Success/.test(String(item.output)));
     response.writeHead(200, { "Content-Type": "text/event-stream" });
-    if (probe.requests < 3) {
+    if (nativeFault === "invalid-arguments") {
+      response.end(mockFunctionCall("call_invalid_native", '{"operations":[]}', toolName));
+      return;
+    }
+    if (probe.requests < 3 && (!nativeFault || !probe.successFeedback)) {
       const operations = { operations: [{ op: "update", path: "fixture.txt", hunks: [{ lines: [
-        { kind: "remove", text: probe.requests === 1 ? "absent" : "old" },
-        { kind: "add", text: "new" },
+        { kind: "remove", text: !nativeFault && probe.requests === 1 ? "absent" : "old" },
+        { kind: "add", text: nativeFault ? "old" : "new" },
+        ...(nativeFault ? [{ kind: "add", text: "marker" }] : []),
       ] }] }] };
-      response.end(mockFunctionCall(probe.requests === 1 ? "call_native_missing" : "call_native_repair", JSON.stringify(operations), toolName));
+      const callId = !nativeFault && probe.requests === 1 ? "call_native_missing" : "call_native_repair";
+      const argumentsText = JSON.stringify(operations);
+      const wire = mockFunctionCall(callId, argumentsText, toolName);
+      if (nativeFault && probe.requests === 1) {
+        const terminalOffset = wire.indexOf("event: response.completed");
+        assert.ok(terminalOffset > 0);
+        const prefix = wire.slice(0, terminalOffset);
+        if (nativeFault === "disconnect") {
+          response.write(prefix);
+          setTimeout(() => response.destroy(), 50);
+        } else {
+          const duplicate = sse([{ type: "response.output_item.done", item: {
+            type: "function_call", id: `fc_${callId}`, call_id: callId, name: toolName, arguments: argumentsText,
+          } }]).replace("data: [DONE]\n\n", "");
+          response.end(prefix + duplicate + wire.slice(terminalOffset));
+        }
+      } else response.end(wire);
     } else {
       const item = { type: "message", id: "msg_native_final", role: "assistant", status: "completed", content: [{ type: "output_text", text: "probe complete", annotations: [] }] };
       response.end(sse([
@@ -299,6 +326,20 @@ const mockXai = http.createServer(async (request, response) => {
     (item) => item?.type === "function_call" && item.name === toolName,
   );
   const historyArgs = typeof history?.arguments === "string" ? history.arguments : "";
+  if (structured && historyArgs.includes("CODEC_CANCEL_WIRE")) {
+    cancelStreamClosed = new Promise((resolve) => response.once("close", resolve));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.write(sse([
+      { type: "response.output_item.added", item: { type: "function_call", id: "fc_cancel", call_id: "call_cancel", name: toolName, arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "fc_cancel", delta: '{"operations":[' },
+    ]).replace("data: [DONE]\n\n", ""));
+    return;
+  }
+  if (structured && historyArgs.includes("CODEC_REJECT_WIRE")) {
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(mockFunctionCall("call_rejected", '{"operations":[]}', toolName));
+    return;
+  }
   const malformed = historyArgs.includes("not-a-json-object");
   const outgoingArgs = structured ? JSON.stringify(structuredOperations) : malformed ? historyArgs : JSON.stringify({ content: UNICODE_PATCH });
   const callId = malformed ? "call_malformed" : "call_unicode";
@@ -497,6 +538,36 @@ try {
   const malformedItem = itemsByCallId(malformedBody).get("call_malformed");
   assert.equal(malformedItem?.type, "custom_tool_call");
   assert.equal(malformedItem.input, structured ? serializeStructuredPatch(structuredOperations) : MALFORMED_PATCH);
+  if (structured) {
+    const rejected = await postTurn(applyPatchRequest({ historyInput: "CODEC_REJECT_WIRE", historyId: "ctc_reject" }));
+    assert.equal(capturedGrok.length, 3, "invalid arguments must not cause a hidden Router request");
+    assert.ok(rejected.includes('"type":"error"') || rejected.includes('"type":"response.failed"'), "invalid arguments must surface a transport error");
+    assert.equal(rejected.includes("*** Begin Patch"), false, "invalid arguments must not produce executable patch input");
+    assert.equal(itemsByCallId(rejected).get("call_rejected")?.input || "", "");
+    assert.equal(rejected.includes('"type":"response.completed"'), false);
+
+    const canceler = new AbortController();
+    const held = fetch(routerUrl, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(applyPatchRequest({ historyInput: "CODEC_CANCEL_WIRE", historyId: "ctc_cancel" })),
+      signal: canceler.signal,
+    }).then((response) => response.text()).then(() => undefined, (error) => error);
+    const startedDeadline = Date.now() + 10_000;
+    while (!cancelStreamClosed && Date.now() < startedDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    canceler.abort();
+    const canceled = await held;
+    assert.ok(cancelStreamClosed, "the canceled request must have reached the mock upstream");
+    assert.equal(canceled?.name, "AbortError");
+    let closeTimer;
+    await Promise.race([
+      cancelStreamClosed,
+      new Promise((_, reject) => { closeTimer = setTimeout(() => reject(new Error("cancellation did not reach mock upstream")), 10_000); }),
+    ]).finally(() => clearTimeout(closeTimer));
+    assert.equal(capturedGrok.length, 4, "client cancellation must not trigger a replay");
+    process.stdout.write("ok malformed arguments fail closed without a hidden request; client cancellation closes the complete local upstream path\n");
+  }
   if (codexBinary) {
     // Offline handler integration only. This separate CLI process is not a
     // native Desktop benchmark or evidence of benchmark read isolation.
@@ -515,7 +586,7 @@ try {
     assert.ok(template, "bundled metadata must provide the native freeform patch tool");
     const catalogPath = path.join(workspace, "probe-catalog.json");
     writeFileSync(catalogPath, JSON.stringify({ models: [routedModel(template, MODEL_BY_SLUG.get("grok-oauth/grok-4.6"))] }));
-    nativeRecoveryProbe = { requests: 0, contextFailure: false, successFeedback: false };
+    nativeRecoveryProbe = { requests: 0, contextFailure: false, successFeedback: false, invalidArgumentFeedback: false };
     const args = ["exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check", "--sandbox", "workspace-write", "--color", "never", "--json", "--model", "grok-oauth/grok-4.6", "--cd", fixtureDir, "--disable", "plugins", "--disable", "remote_plugin"];
     for (const setting of [
       'model_provider="local-protocol"',
@@ -542,14 +613,28 @@ try {
       client.once("exit", (code) => resolve(code));
     }).finally(() => clearTimeout(timer));
     assert.equal(timedOut, false, "native offline handler probe deadline");
-    if (exit !== 0) {
+    if (exit !== 0 && nativeFault !== "invalid-arguments") {
       process.stderr.write(`offline probe state: ${JSON.stringify(nativeRecoveryProbe)}\n`);
       process.stderr.write(`Router: ${routerChild.testOutput()}\nForwarder: ${grokChild.testOutput()}\nLiteLLM: ${litellmChild.testOutput()}\n`);
     }
-    assert.equal(exit, 0, client.testOutput());
-    assert.deepEqual(nativeRecoveryProbe, { requests: 3, contextFailure: true, successFeedback: true });
-    assert.equal(readFileSync(path.join(fixtureDir, "fixture.txt"), "utf8"), "new\n");
-    process.stdout.write("ok installed Codex workspace-write handler received context failure, then applied repair through the complete local protocol path\n");
+    if (nativeFault === "invalid-arguments") {
+      assert.equal(exit, 1, "invalid arguments currently fail the Codex turn");
+      assert.deepEqual(nativeRecoveryProbe, { requests: 6, contextFailure: false, successFeedback: false, invalidArgumentFeedback: false });
+      assert.equal(readFileSync(path.join(fixtureDir, "fixture.txt"), "utf8"), "old\n");
+      assert.match(client.testOutput(), /turn.failed/);
+      process.stdout.write("observed limitation: invalid structured arguments leave the fixture unchanged, but Codex makes six transport attempts and fails without native tool feedback\n");
+    } else if (nativeFault) {
+      assert.equal(exit, 0, client.testOutput());
+      assert.ok(nativeRecoveryProbe.requests >= 2 && nativeRecoveryProbe.requests <= 3);
+      assert.equal(nativeRecoveryProbe.successFeedback, true);
+      assert.equal(readFileSync(path.join(fixtureDir, "fixture.txt"), "utf8"), "old\nmarker\n", "fault/retry must not apply the insertion twice");
+      process.stdout.write(`ok installed Codex ${nativeFault}: one marker after fault/retry, ${nativeRecoveryProbe.requests} upstream requests\n`);
+    } else {
+      assert.equal(exit, 0, client.testOutput());
+      assert.deepEqual(nativeRecoveryProbe, { requests: 3, contextFailure: true, successFeedback: true, invalidArgumentFeedback: false });
+      assert.equal(readFileSync(path.join(fixtureDir, "fixture.txt"), "utf8"), "new\n");
+      process.stdout.write("ok installed Codex workspace-write handler received context failure, then applied repair through the complete local protocol path\n");
+    }
   }
 } finally {
   await Promise.all(children.map((child) => stopChild(child)));
