@@ -173,6 +173,12 @@ and still requires the exact Grok 4.6 route and Router hook flag. Other model
 routes retain their tool behavior. The endpoint is a client declaration, not
 proof that the hook was discovered, trusted or executed.
 
+On the shared WebSocket edge, a streamed `error` without a valid HTTP failure
+status receives status 502. Native Codex otherwise ignores that event and can
+wait indefinitely on the still-open socket. Existing 400–599 statuses and error
+details are preserved. This changes failure framing for every WebSocket route;
+it does not initiate a Router retry or replay a partially delivered response.
+
 The Codex config manager preserves this explicitly selected base on enable,
 repair and caller-capability refresh; fresh installs continue to select `/v1`.
 Selecting it requires the same independent protected-payload and native-trust
