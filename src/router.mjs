@@ -94,6 +94,10 @@ import {
   unsupportedSearchContractError,
 } from "./search-capability.mjs";
 import {
+  markChatWireSearchHistory,
+  usesChatCompletionsWire,
+} from "./chat-wire-search-history.mjs";
+import {
   canonicalProviderId,
   readProviderSelection,
   selectedConfiguredListedModels,
@@ -3238,6 +3242,20 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   }
   if (consoleGoResponsesCompatibility) {
     routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
+  }
+  // Last, so the marker text is built from the history every other rewrite has
+  // already settled. A chat-wire route would otherwise hand LiteLLM a
+  // `web_search_call` it silently discards, and the model answers this turn
+  // from a hole in the transcript instead of the search it was replayed.
+  if (usesChatCompletionsWire(provider)) {
+    const marked = markChatWireSearchHistory(routedInput);
+    if (marked.replaced > 0) {
+      routedInput = marked.input;
+      console.error(
+        `[codex-router] search-history model=${route.slug} wire=chat ` +
+        `web_search_call_items=${marked.replaced} action=replayed_as_text`,
+      );
+    }
   }
   const routed = {
     ...payload,
