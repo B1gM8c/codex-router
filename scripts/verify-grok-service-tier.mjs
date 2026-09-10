@@ -73,7 +73,12 @@ function start(executable, args, env) {
 let gateway, router;
 function usageRecords() {
   const file = path.join(temp, "usage-events.jsonl");
-  return existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
+  if (!existsSync(file)) return [];
+  const text = readFileSync(file, "utf8");
+  // Another process may still be appending the final JSONL record. Only a
+  // newline commits a row; malformed completed rows must still fail.
+  const end = text.lastIndexOf("\n");
+  return end < 0 ? [] : text.slice(0, end).split("\n").filter(Boolean).map(JSON.parse);
 }
 async function ready(url, child, headers = {}) {
   const deadline = Date.now() + 45000;
@@ -141,6 +146,15 @@ async function run(model, tier, streaming) {
   console.log(JSON.stringify({ model, requested: tier, actual: want ?? "missing", streaming, textPieces: 1000, textPreserved: true }));
 }
 try {
+  // Exercise the cross-process read boundary before the Router starts.
+  const ledgerFixture = path.join(temp, "usage-events.jsonl");
+  writeFileSync(ledgerFixture, '{"inputTokens":');
+  assert.deepEqual(usageRecords(), []);
+  writeFileSync(ledgerFixture, '{"inputTokens":10}\n{"outputTokens":');
+  assert.deepEqual(usageRecords(), [{ inputTokens: 10 }]);
+  writeFileSync(ledgerFixture, '{"broken":}\n');
+  assert.throws(usageRecords, SyntaxError);
+  rmSync(ledgerFixture);
   const deadline = Date.now() + 10000;
   while (true) {
     assert.equal(forwarder.exitCode, null, errors);
