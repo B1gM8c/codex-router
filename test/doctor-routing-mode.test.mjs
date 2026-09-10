@@ -50,12 +50,15 @@ esac
 function child(script, args, env) {
   const childEnv = {
     ...env,
-    // This test redirects Codex/router state, but Windows service status reads
-    // the machine-wide Task Scheduler. A developer with the real router
-    // running would otherwise make fixture doctor calls wait on the live task.
-    ...(process.platform === "win32" && script === "doctor.mjs"
-      ? { CODEX_ROUTER_SERVICE_PLATFORM: "test-fixture" }
-      : {}),
+    // This test redirects Codex/router state, but service status is read from
+    // the machine, not from that state: launchd on macOS, systemd on Linux and
+    // Task Scheduler on Windows all answer for the developer's real install.
+    // A maintainer with the router running therefore made the fixture report a
+    // loaded service, and doctor waits 30s rather than 2s for a router that
+    // will never appear on the fixture's port -- past this child's own bound,
+    // leaving empty stdout for the JSON parse below. CI has no service
+    // installed, so it only ever reproduced locally.
+    ...(script === "doctor.mjs" ? { CODEX_ROUTER_SERVICE_PLATFORM: "test-fixture" } : {}),
   };
   return spawnSync(process.execPath, [path.join(root, "src", script), ...args], {
     cwd: root,
