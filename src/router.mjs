@@ -64,6 +64,11 @@ import {
 } from "./zai-responses-compat.mjs";
 import { grokReasoningSummaryCompatTransform } from "./grok-reasoning-summary-compat.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
+import {
+  deepSeekCustomToolNames,
+  deepSeekResponsesInput,
+  usesDeepSeekResponses,
+} from "./deepseek-responses.mjs";
 import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
 import {
   MERGED_CATALOG_PATH,
@@ -103,6 +108,7 @@ import {
   selectedConfiguredListedModels,
 } from "./provider-selection.mjs";
 import { maxImageTokensForRoute } from "./prompt-image-usage.mjs";
+import { usesNativeChatReasoning } from "./chat-reasoning.mjs";
 import {
   estimateInputTokens,
   mergeTokenUsage,
@@ -833,6 +839,13 @@ function routedHeaders() {
     "Accept-Encoding": "identity",
     "User-Agent": `codex-router/${VERSION}`,
   };
+}
+
+// DeepSeek's current model already speaks Codex's wire protocol. The shared
+// API forwarder still owns credentials and upstream transport; bypass only
+// LiteLLM, whose unknown-model fallback simulates native Responses streaming.
+function routedResponsesTarget(route) {
+  return `${usesDeepSeekResponses(route) ? API_BASE : GATEWAY_BASE}/responses`;
 }
 
 // LiteLLM translates Codex Responses requests into Chat Completions only after
@@ -2003,14 +2016,11 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
   }
 }
 
-// DeepSeek thinking mode rejects a turn whose assistant message carries no
-// reasoning_content. LiteLLM's Responses->chat translation drops `reasoning`
-// input items entirely (`_transform_responses_api_input_item_to_chat_completion_message`
-// returns nothing for an item whose `content` is null, which is the shape
-// Codex stores), so the reasoning text never reaches the provider at all.
-// Carry each run of reasoning items onto the assistant turn it belongs to, and
-// the translation keeps it as that message's content. In-place, no-op when
-// there is nothing to carry.
+// Chat thinking providers need reasoning on the assistant turn it belongs to.
+// LiteLLM drops summary-only reasoning, but turns roleless plaintext content
+// into a user message. Carry each run onto its assistant and consume the
+// originals on Chat routes, so both input shapes replay exactly once. The
+// caller supplies a copied array; items are replaced, never mutated.
 //
 // Every assistant turn needs covering, not only the ones that call a tool.
 // This used to carry the reasoning solely into a following `function_call` or
@@ -2019,7 +2029,10 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
 // *next* request for a reasoning_content it had never been given. A subagent
 // always ends that way, which is why spawning one failed every time and an
 // ordinary tool loop did not (#256).
-function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
+function carryReasoningThroughInput(input, {
+  nativeThinking = false,
+  removeCarriedReasoning = false,
+} = {}) {
   if (!Array.isArray(input) || input.length < 2) return;
   for (let index = 0; index < input.length - 1; index += 1) {
     if (input[index]?.type !== "reasoning") continue;
@@ -2035,13 +2048,11 @@ function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
     }
     const text = texts.join("\n");
     const next = input[end];
-    // Only the last item of the run is rewritten. The earlier ones stay
-    // `reasoning` items, which the translation drops -- their text is already
-    // in the joined value, and leaving them in place keeps the array the same
-    // length for every other pass over it.
+    let removed = 0;
     if (text && next) {
       if (next.type === "function_call" || next.type === "custom_tool_call") {
         input[end - 1] = assistantTextItem(text, nativeThinking);
+        if (removeCarriedReasoning) removed = end - index - 1;
       } else if (next.type === "message" && next.role === "assistant") {
         // Merged into the assistant message rather than inserted in front of
         // it. A separate message would put two assistant turns back to back,
@@ -2050,9 +2061,14 @@ function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
         // LiteLLM folds a following function_call into the assistant message
         // it already emitted.
         input[end] = mergeAssistantText(next, text, nativeThinking);
+        if (removeCarriedReasoning) removed = end - index;
       }
     }
-    index = end - 1;
+    // Native Responses providers retain their existing item semantics. On
+    // Chat routes remove only a run successfully carried onto an assistant;
+    // unrelated or trailing reasoning must not be silently discarded.
+    if (removed) input.splice(index, removed);
+    index = end - removed - 1;
   }
 }
 
@@ -2541,7 +2557,7 @@ async function summarizeWith(
     normalizeProviderAppToolOutputs(aged.input),
     route,
   );
-  const providerInput = needsConsoleGoResponsesToolCompatibility(route)
+  const providerInput = (needsConsoleGoResponsesToolCompatibility(route) || usesDeepSeekResponses(route))
     ? strictOpenCodeCompactionInput(compatibleInput, payload.tools, {
         maxNameLength: 64,
       })
@@ -2591,7 +2607,7 @@ async function summarizeWith(
   ) {
     return { searchCapabilityChanged: true };
   }
-  const upstream = await fetch(`${GATEWAY_BASE}/responses`, {
+  const upstream = await fetch(routedResponsesTarget(route), {
     method: "POST",
     headers: routedHeaders(),
     body: serialized,
@@ -3022,6 +3038,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   let flattenedNamespaces = new Map();
   const provider = providerForModel(route);
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
+  const deepSeekResponses = usesDeepSeekResponses(route);
   const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
   const compatibleInput = zenFreeCompatibleInput(
     normalizeProviderAppToolOutputs(agedInput),
@@ -3071,15 +3088,18 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // string, and spreading one of those produces an array of single characters
   // -- a turn that still reaches the provider, and still reads as a 200,
   // having quietly replaced the prompt with its own letters.
-  const input = Array.isArray(bridged) ? [...bridged] : bridged;
-  // Thinking chat providers need the assistant's reasoning replayed, but
-  // LiteLLM drops Responses `reasoning` input items. Generic providers keep
-  // the established visible-content carry used for DeepSeek. GLM's native
-  // preserved-thinking contract needs reasoning kept structurally separate so
-  // the API forwarder can restore it as `reasoning_content` before Z.ai.
-  carryReasoningThroughInput(input, {
-    nativeThinking: chatCompletionsProvider && route.requestProfile === "glm-thinking",
-  });
+  const input = deepSeekResponses
+    ? deepSeekResponsesInput(bridged)
+    : Array.isArray(bridged) ? [...bridged] : bridged;
+  // Legacy Chat routes retain their existing reasoning carry. The native
+  // DeepSeek route already has exactly one plaintext reasoning item and must
+  // not copy it into an assistant message for Chat translation.
+  if (!deepSeekResponses) {
+    carryReasoningThroughInput(input, {
+      nativeThinking: chatCompletionsProvider && usesNativeChatReasoning(route),
+      removeCarriedReasoning: chatCompletionsProvider,
+    });
+  }
   // Models marked requiresTrailingUserTurn reject requests ending with a model
   // turn. Pop trailing assistant messages, reasoning, or subagent outputs.
   if (requiresTrailingUserTurn(route)) {
@@ -3100,9 +3120,10 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // is how the client ships the collaboration runtime, the app toolset
   // (threads, automations, navigation), and every MCP server (node_repl,
   // peekaboo, github, ...). Chat-completions providers need every namespace
-  // flattened into ordinary functions; the response transform maps calls back
-  // to the client's native namespace shape.
-  if (chatCompletionsProvider) {
+  // flattened into ordinary functions; DeepSeek's native Responses endpoint
+  // requires the same tool subset. The response transform maps calls back to
+  // the client's native namespace shape.
+  if (chatCompletionsProvider || deepSeekResponses) {
     // Relay the app's full native toolset (threads, automations, app
     // navigation) to the provider. The client registers these tools with
     // deferLoading and executes the calls natively, but only sends a reduced
@@ -3171,13 +3192,13 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
-  if (needsStrictOpenCodeToolCompatibility(route)) {
+  if (needsStrictOpenCodeToolCompatibility(route) || deepSeekResponses) {
     const customTools = bridgeCustomTools(
       tools,
       routedInput,
       flattenedNamespaces,
       routedToolChoice,
-      undefined,
+      deepSeekResponses ? deepSeekCustomToolNames(tools, routedInput, routedToolChoice) : undefined,
       consoleGoResponsesCompatibility
         ? { maxNameLength: 64, bridgeAll: true }
         : undefined,
@@ -3186,7 +3207,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
   }
-  if (chatCompletionsProvider || consoleGoResponsesCompatibility) {
+  if (chatCompletionsProvider || consoleGoResponsesCompatibility || deepSeekResponses) {
     let searchHistory;
     try {
       searchHistory = flattenToolSearchHistory(
@@ -3241,7 +3262,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
       );
     }
   }
-  if (consoleGoResponsesCompatibility) {
+  if (consoleGoResponsesCompatibility || deepSeekResponses) {
     routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
   }
   // Last, so the marker text is built from the history every other rewrite has
@@ -3284,7 +3305,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // reaches the provider. Set both: `reasoning.effort` is what actually
   // travels, and the flat field is what a bare chat-completions gateway reads.
   if (childEffort) {
-    routed.reasoning_effort = childEffort;
+    if (!deepSeekResponses) routed.reasoning_effort = childEffort;
     routed.reasoning = { ...(routed.reasoning || {}), effort: childEffort };
   }
   normalizeAutoToolChoice(routed, route);
@@ -3303,7 +3324,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   if (rejectsWebSearchOptions(route)) delete routed.web_search_options;
   return {
     body: Buffer.from(JSON.stringify(routed), "utf8"),
-    target: `${GATEWAY_BASE}/responses`,
+    target: routedResponsesTarget(route),
     headers: routedHeaders(),
     // The exact mode used while constructing this body. Failover compares it
     // with the immutable source contract as well as live state immediately

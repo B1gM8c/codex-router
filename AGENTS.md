@@ -1927,6 +1927,39 @@ cheap plans means speaking that route.
    and it is why the note stays on the registry entry now that the plan no
    longer blocks access outright.
 
+## DeepSeek Responses and Chat reasoning replay
+
+Only direct provider `deepseek` with upstream model `deepseek-flash` uses the
+existing API forwarder's native `/responses` route, including compaction.
+Legacy aliases and resellers retain Chat. LiteLLM 1.96's unknown-model fallback
+removes upstream streaming and synthesizes SSE; setting its protocol alone is
+insufficient. Keep credentials, transport, usage, cancellation and pre-byte
+retry rules on the shared path.
+
+- Replay native reasoning once as a `reasoning.content` array of `reasoning_text`
+  parts; convert legacy summaries there, never into visible messages. Preserve
+  typed image/tool outputs and `input_image.file_id`, without uploading files.
+- Convert recovered `agent_message` handoffs with `agentMessagesAsUserMessages`
+  on ordinary and compaction requests: task text in an unsupported item type
+  is not delivered. Flatten namespaces/deferred tools through the existing
+  adapters; retain native top-level `apply_patch` and bridge other custom tools.
+  Restore exact namespace/name identities, including plain-name collisions.
+- GLM thinking, legacy DeepSeek thinking and Command Code's DeepSeek Flash Chat
+  route carry reasoning through LiteLLM as assistant `thinking` parts, restored
+  by the forwarder to `reasoning_content`. Remove only successfully carried
+  reasoning runs so plaintext cannot also become a user message. Do not mutate
+  source items or change other native Responses routes. Keep this policy shared
+  between hops without applying direct DeepSeek sampling parameters to resellers.
+  Command Code's schema-strict `/alpha/generate` fallback remains separate.
+
+Regression coverage lives in `test/deepseek-responses-routing.test.mjs`,
+`test/namespace-relay-custom.test.mjs`, `test/chat-reasoning.test.mjs` and the
+Chat replay cases in `test/routing.test.mjs`. For the optional offline proof,
+set `MODEL_ROUTER_TEST_LITELLM_PYTHON` to a Python interpreter with the repository's
+pinned LiteLLM and run `node --test test/chat-reasoning.test.mjs`. It uses only
+loopback services and synthetic credentials, with duplicate negative controls.
+See the provider's [Responses contract](https://api-docs.deepseek.com/guides/responses_api/).
+
 ## Substituting a prompt-token count a provider reported as zero
 
 Codex decides when to compact from the `input_tokens` each response reports, so
