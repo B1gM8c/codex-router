@@ -262,6 +262,7 @@ Linux installations support the Codex CLI.
 | Kimi K3 (China API) | `kimi-api-cn/kimi-k3` | Separately billed Moonshot **China** platform key |
 | DeepSeek V4 Flash (API) | `deepseek/deepseek-v4-flash` | DeepSeek API key |
 | DeepSeek V4 Pro (API) | `deepseek/deepseek-v4-pro` | DeepSeek API key |
+| DeepSeek V4.1 Flash (API) | `deepseek/deepseek-flash` | DeepSeek API key |
 | Grok 4.5 (OAuth) | `grok-oauth/grok-4.5` | Official Grok CLI OAuth session |
 | Grok 4.5 (API) | `grok-api/grok-4.5` | Separately billed xAI API key |
 | Claude Opus 4.8 (API) | `anthropic-api/claude-opus-4.8` | Separately billed Anthropic API key |
@@ -700,6 +701,7 @@ the operator explicitly selects them.
 | DeepSeek V4 Pro (opencode Go) | `opencode-go/deepseek-v4-pro` |
 | DeepSeek V4 Flash (opencode Go) | `opencode-go/deepseek-v4-flash` |
 | DeepSeek V4 Flash Vision Exp (opencode Go) | `opencode-go/deepseek-v4-flash-vision-exp` |
+| DeepSeek V4.1 Flash (opencode Go) | `opencode-go/deepseek-v4.1-flash` |
 | MiMo-V2.5 (opencode Go) | `opencode-go/mimo-v2.5` |
 | MiMo-V2.5-Pro (opencode Go) | `opencode-go/mimo-v2.5-pro` |
 | Hy3 (opencode Go) | `opencode-go/hy3` |
@@ -868,6 +870,7 @@ preserves Command Code's reported cached-token usage.
 | --- | --- |
 | DeepSeek V4 Flash (Command Code) | `commandcode/deepseek-v4-flash` |
 | DeepSeek V4 Pro (Command Code) | `commandcode/deepseek-v4-pro` |
+| DeepSeek V4.1 Flash (Command Code) | `commandcode/deepseek-v4.1-flash` |
 | GLM-5.2 (Command Code) | `commandcode/glm-5.2` |
 | Kimi K3 (Command Code) | `commandcode/kimi-k3` |
 | Kimi K2.7 Code (Command Code) | `commandcode/kimi-k2.7-code` |

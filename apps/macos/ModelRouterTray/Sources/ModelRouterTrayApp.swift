@@ -458,7 +458,10 @@ final class TrayMenuController: NSObject {
 
   init(store: RouterStore) {
     self.store = store
-    let length = MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode)
+    let length = MenuBarLayoutMetrics.statusItemWidth(
+      displayMode: store.menuBarDisplayMode,
+      standardContentWidth: store.menuBarStandardWidth()
+    )
     statusItem = NSStatusBar.system.statusItem(withLength: length)
     let hosting = NSHostingView(rootView: StatusItemLabel(store: store))
     hosting.sizingOptions = []
@@ -476,11 +479,19 @@ final class TrayMenuController: NSObject {
     super.init()
     configureStatusItem()
     configurePanel()
-    displayModeCancellable = store.$menuBarDisplayMode
+    // Standard mode is measured from the label, so the slot has to follow the
+    // provider name, the usage text and the icon style -- not just the display
+    // mode. objectWillChange fires before the store mutates, and hopping to the
+    // main queue lands after it, so the measurement reads the new values.
+    // applyStatusItemMetrics() is a no-op when the width is unchanged.
+    displayModeCancellable = store.objectWillChange
       .receive(on: DispatchQueue.main)
       .sink { [weak self] _ in
         guard let self else { return }
-        self.applyStatusItemMetrics()
+        // Only a slot that actually resized can have moved the panel's anchor.
+        // Repositioning on every store tick would drag AppKit through a window
+        // frame change once a second while the panel is open.
+        guard self.applyStatusItemMetrics() else { return }
         if self.panel.isVisible {
           self.reposition()
         }
@@ -555,11 +566,24 @@ final class TrayMenuController: NSObject {
     panel.setContentSize(TrayPanelPlacement.panelSize)
   }
 
-  private func applyStatusItemMetrics() {
-    let width = MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode)
+  /// Returns whether the slot actually changed size.
+  @discardableResult
+  private func applyStatusItemMetrics() -> Bool {
+    let width = MenuBarLayoutMetrics.statusItemWidth(
+      displayMode: store.menuBarDisplayMode,
+      standardContentWidth: store.menuBarStandardWidth()
+    )
     let height = MenuBarLayoutMetrics.statusItemHeight(displayMode: store.menuBarDisplayMode)
+    // Standard mode is now content-sized, so this runs on every label change,
+    // not just a mode switch. Assigning an unchanged length still makes AppKit
+    // relayout the menu bar, and the activity poll ticks once a second.
+    guard statusItem.length != width
+      || statusHostingView.frame.width != width
+      || statusHostingView.frame.height != height
+    else { return false }
     statusItem.length = width
     statusHostingView.frame = NSRect(x: 0, y: 0, width: width, height: height)
+    return true
   }
 
   @objc private func statusItemClicked(_ sender: Any?) {
@@ -1690,6 +1714,26 @@ final class RouterStore: ObservableObject {
     if names.count == 1 { return names[0] }
     if names.count == 2 { return "\(names[0]) + \(names[1])" }
     return "\(names[0]) +\(names.count - 1)"
+  }
+
+  // The exact strings StatusItemLabel draws. The status item is sized from
+  // these, so the measurement and the render cannot drift apart.
+  var menuBarNameText: String {
+    hasConcurrentActivity ? activitySummaryLabel : selectedUsageProvider.shortName
+  }
+
+  var menuBarDetailText: String {
+    hasConcurrentActivity ? compactActivityProvidersLabel : (selectedUsageText ?? "")
+  }
+
+  func menuBarStandardWidth(pulsing: Bool = false) -> CGFloat {
+    MenuBarLayoutMetrics.standardContentWidth(
+      iconStyle: menuBarIconStyle,
+      showModelName: menuBarShowModelName,
+      nameText: menuBarNameText,
+      detailText: menuBarDetailText,
+      pulsing: pulsing
+    )
   }
 
   var uniqueActiveProviderShortNames: [String] {
@@ -5177,20 +5221,94 @@ struct MenuBarSettings: Equatable {
 }
 
 enum MenuBarLayoutMetrics {
-  static let standardReservedWidth: CGFloat = 180
+  // A cap, not a reservation. Standard mode used to hand this width back for
+  // every state, so a short label -- or a hidden model name -- left the unused
+  // remainder as blank menu-bar space before the next item. The slot is now
+  // measured from what is actually drawn and only clamped here, which keeps
+  // long labels truncating exactly as they did.
+  static let standardMaximumWidth: CGFloat = 180
+  // Below this the item is too small to be a comfortable click target, and an
+  // icon that touches both edges reads as clipped rather than compact.
+  static let standardMinimumWidth: CGFloat = 30
   static let standardHeight: CGFloat = 22
   static let standardIconSize: CGFloat = 15
+  // The indicator style draws a 6pt dot instead of the 15pt mark.
+  static let standardIndicatorSize: CGFloat = 6
+  // Mirrors the HStack spacing and the breathing room the fixed slot used to
+  // provide incidentally; measuring has to agree with StatusItemLabel or the
+  // text clips one glyph early.
+  static let standardContentSpacing: CGFloat = 5
+  static let standardHorizontalInset: CGFloat = 6
   static let iconOnlyWidth: CGFloat = standardHeight
   static let iconOnlyHeight: CGFloat = 22
   static let iconOnlyIconSize: CGFloat = standardIconSize
   static let attentionPulseScale: CGFloat = 1.4
   static let standardIndicatorPulseScale: CGFloat = 2.1
 
-  nonisolated static func statusItemWidth(
-    displayMode: TrayMenuBarDisplayMode,
+  // SwiftUI renders these with `.system(size:weight:design:)`; measuring with a
+  // different face would size the slot for text the menu bar never draws.
+  nonisolated static func standardNameFont() -> NSFont {
+    let base = NSFont.systemFont(ofSize: 11, weight: .medium)
+    guard let descriptor = base.fontDescriptor.withDesign(.rounded),
+      let rounded = NSFont(descriptor: descriptor, size: 11)
+    else { return base }
+    return rounded
+  }
+
+  nonisolated static func standardDetailFont() -> NSFont {
+    NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
+  }
+
+  nonisolated static func standardTextWidth(_ text: String, font: NSFont) -> CGFloat {
+    guard !text.isEmpty else { return 0 }
+    return ceil((text as NSString).size(withAttributes: [.font: font]).width)
+  }
+
+  /// The width Standard mode needs for the content it is about to draw, capped
+  /// at `standardMaximumWidth` so an overlong label still truncates instead of
+  /// pushing every other menu-bar item aside.
+  nonisolated static func standardContentWidth(
+    iconStyle: TrayMenuBarIconStyle,
+    showModelName: Bool,
+    nameText: String,
+    detailText: String,
     pulsing: Bool = false
   ) -> CGFloat {
-    guard displayMode == .iconOnly else { return standardReservedWidth }
+    var segments: [CGFloat] = [standardLeadingGlyphWidth(iconStyle: iconStyle, pulsing: pulsing)]
+    if showModelName, !nameText.isEmpty {
+      segments.append(standardTextWidth(nameText, font: standardNameFont()))
+    }
+    if !detailText.isEmpty {
+      segments.append(standardTextWidth(detailText, font: standardDetailFont()))
+    }
+    let spacing = standardContentSpacing * CGFloat(max(0, segments.count - 1))
+    let content = segments.reduce(0, +) + spacing + standardHorizontalInset * 2
+    return min(standardMaximumWidth, max(standardMinimumWidth, ceil(content)))
+  }
+
+  // A pulse scales the glyph in place. The slot has to grow with it or the
+  // animation is clipped against its own status item.
+  nonisolated static func standardLeadingGlyphWidth(
+    iconStyle: TrayMenuBarIconStyle,
+    pulsing: Bool
+  ) -> CGFloat {
+    if iconStyle == .indicator {
+      let size = pulsing ? standardIndicatorSize * standardIndicatorPulseScale : standardIndicatorSize
+      return ceil(size)
+    }
+    let size = pulsing ? standardIconSize * attentionPulseScale : standardIconSize
+    return ceil(size)
+  }
+
+  nonisolated static func statusItemWidth(
+    displayMode: TrayMenuBarDisplayMode,
+    pulsing: Bool = false,
+    standardContentWidth: CGFloat? = nil
+  ) -> CGFloat {
+    // No measurement supplied means the caller cannot know the label yet, so
+    // fall back to the historical full slot rather than guessing small and
+    // clipping.
+    guard displayMode == .iconOnly else { return standardContentWidth ?? standardMaximumWidth }
     guard pulsing else { return iconOnlyWidth }
     let iconWidth = iconOnlyIconSize * attentionPulseScale
     return max(iconOnlyWidth, ceil(iconWidth))
@@ -5492,12 +5610,18 @@ private struct StatusItemLabel: View {
         }
       }
       .frame(
-        width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode, pulsing: pulsing),
+        width: MenuBarLayoutMetrics.statusItemWidth(
+          displayMode: store.menuBarDisplayMode,
+          pulsing: pulsing,
+          standardContentWidth: store.menuBarStandardWidth(pulsing: pulsing)
+        ),
         height: MenuBarLayoutMetrics.statusItemHeight(
           displayMode: store.menuBarDisplayMode,
           pulsing: pulsing
         ),
-        alignment: .leading
+        // The slot is measured from this content now, so centring it keeps the
+        // inset even on both sides instead of banking it all as a trailing gap.
+        alignment: .center
       )
       .clipped()
       .help(tooltipText)
