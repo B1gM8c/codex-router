@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **DeepSeek V4.1 Flash is available on four providers, alongside V4.**
+  DeepSeek released V4.1 Flash on 2026-09-10. New routes:
+  `deepseek/deepseek-flash` (1M window, image input, thinking with
+  low/high/max), `opencode-go/deepseek-v4.1-flash` (OpenCode's renamed id;
+  the launch-day `deepseek-flash` id is deprecated and not routed),
+  `nousresearch/deepseek-v4.1-flash` (sized to the Portal's served 262,144
+  window), and `commandcode/deepseek-v4.1-flash` (text-only until image input
+  is verified at the Provider API). Every V4 route stays listed. On the
+  DeepSeek API the V4 Flash ids are now served by V4.1 Flash, and from
+  2026-09-14 04:00 UTC `deepseek-v4-pro` requests are served by V4.1 Flash too.
+  Ollama Cloud and ClinePass do not offer V4.1 Flash yet. Evidence is in
+  `docs/research/deepseek-v4-1-flash-2026-09-11.md`.
+
 - **The ChatGPT Web provider is removed: using it risked an OpenAI account
   ban.** `chatgpt-web` routed Codex turns into an unofficial browser automation
   of chatgpt.com, driven through a separately installed launcher on loopback
