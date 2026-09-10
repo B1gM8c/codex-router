@@ -1,3 +1,7 @@
+import {
+  actualServiceTierFromValue,
+} from "./request-diagnostics.mjs";
+
 // SSE joins repeated `data:` fields with a line feed before dispatch.
 // Reading only the first field truncates multiline JSON.
 export function sseDataFromBlock(rawEvent) {
@@ -143,6 +147,8 @@ export function classifyAfterToolRepair(second) {
 export function selectedRetryUsage(first, second) {
   const selected = second || first;
   const usage = selected ? { ...selected } : {};
+  delete usage.service_tier;
+  delete usage.billed_service_tier;
   const billedPromptTokens =
     (first?.prompt_tokens || 0) + (second?.prompt_tokens || 0);
   const billedCompletionTokens =
@@ -234,10 +240,29 @@ export function createTurnState({ toolNameMapper = (name) => name } = {}) {
     toolCalls: [],
     toolByItemId: new Map(),
     usage: undefined,
+    serviceTier: undefined,
+    serviceTierUnknown: false,
     terminalStatus: undefined,
     deltas: [],
     toolNameMapper,
   };
+}
+
+export function chatServiceTierFields(turn) {
+  // LiteLLM's Responses bridge drops the standard Chat field but preserves
+  // provider_specific_fields. Carry only provider-reported bounded metadata.
+  if (turn?.serviceTierUnknown) return { provider_specific_fields: { grok_service_tier: "unknown" } };
+  if (turn?.serviceTier) return {
+    service_tier: turn.serviceTier,
+    provider_specific_fields: { grok_service_tier: turn.serviceTier },
+  };
+  return {};
+}
+
+function attachActualServiceTier(state, response) {
+  const actual = actualServiceTierFromValue(response?.service_tier);
+  state.serviceTier = actual.kind === "known" ? actual.value : undefined;
+  state.serviceTierUnknown = actual.kind === "unknown";
 }
 
 export function mapUpstreamUsage(usage) {
@@ -394,17 +419,20 @@ export function applyResponsesEvent(state, event) {
         ? "completed"
         : status === "failed" ? "failed" : "incomplete";
       state.usage = mapUpstreamUsage(event.response?.usage);
+      attachActualServiceTier(state, event.response);
       break;
     }
     case "response.failed":
     case "error": {
       state.terminalStatus = "failed";
       state.usage = mapUpstreamUsage(event.response?.usage);
+      attachActualServiceTier(state, event.response);
       break;
     }
     case "response.incomplete": {
       state.terminalStatus = "incomplete";
       state.usage = mapUpstreamUsage(event.response?.usage);
+      attachActualServiceTier(state, event.response);
       break;
     }
     default:
@@ -421,6 +449,8 @@ export function finalizeTurn(state) {
     reasoningText: state.reasoningText,
     toolCalls: state.toolCalls,
     usage: state.usage,
+    serviceTier: state.serviceTier,
+    serviceTierUnknown: state.serviceTierUnknown === true,
     deltas: state.deltas,
     terminalStatus,
     finishReason: terminalStatus === "completed"

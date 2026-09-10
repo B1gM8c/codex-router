@@ -29,6 +29,7 @@ import {
 } from "./grok-oauth-tool-alias.mjs";
 import {
   applyResponsesEvent,
+  chatServiceTierFields,
   classifyAfterToolRepair,
   createTurnState,
   DEFAULT_PROGRESS_ONLY_MAX_TEXT,
@@ -44,6 +45,7 @@ import {
   toolCallDeltas,
   withProgressOnlyNudge,
 } from "./grok-oauth-turn.mjs";
+import { knownServiceTier } from "./request-diagnostics.mjs";
 import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
 
@@ -359,6 +361,9 @@ export function toResponsesRequest(chat, options = {}) {
   }
 
   const request = { model: chat.model, input, stream: true, store: false };
+  if (chat.model === "grok-4.6" && knownServiceTier(chat.service_tier)) {
+    request.service_tier = knownServiceTier(chat.service_tier);
+  }
   if (instructions) request.instructions = instructions;
   const effort = mapEffort(chat.reasoning_effort, chat.model);
   if (effort) request.reasoning = { effort };
@@ -518,13 +523,14 @@ async function consumeResponsesStream(upstreamBody, handlers) {
   if (buffer.trim()) dispatchSseBlock(buffer, handlers);
 }
 
-const OPENAI_ROLE_CHUNK = (id, created, model, delta, finishReason = null) =>
+const OPENAI_ROLE_CHUNK = (id, created, model, delta, finishReason = null, extra = {}) =>
   `data: ${JSON.stringify({
     id,
     object: "chat.completion.chunk",
     created,
     model,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
+    ...extra,
   })}\n\n`;
 
 async function handleChatCompletions(request, response) {
@@ -837,6 +843,8 @@ async function handleChatCompletions(request, response) {
           reasoningText: strictAfterToolRepair ? second.reasoningText : turn.reasoningText,
           toolCalls: second.toolCalls,
           usage,
+          serviceTier: undefined,
+          serviceTierUnknown: false,
           deltas: strictAfterToolRepair
             ? toolCallDeltas(second)
             : [...turn.deltas, ...toolCallDeltas(second)],
@@ -856,6 +864,8 @@ async function handleChatCompletions(request, response) {
           reasoningText: second.reasoningText,
           toolCalls: [],
           usage: selectedRetryUsage(turn.usage, second.usage),
+          serviceTier: undefined,
+          serviceTierUnknown: false,
           deltas: [{ content: repair.contentText }],
           finishReason: "stop",
           terminalStatus: "completed",
@@ -868,7 +878,7 @@ async function handleChatCompletions(request, response) {
             "Grok stopped after a tool result. The router retried once, but the retry neither called a tool nor returned a certified final answer.",
         };
       } else {
-        turn = { ...turn, usage: mergeMappedUsage(turn.usage, second.usage) };
+        turn = { ...turn, usage: mergeMappedUsage(turn.usage, second.usage), serviceTier: undefined, serviceTierUnknown: false };
       }
     } else if (strictAfterToolRepair) {
       repairFailure = {
@@ -901,6 +911,9 @@ async function handleChatCompletions(request, response) {
   // emittedDeltaCount past the suppressed prefix, so releasing is a no-op there.
   bufferShortProgress = false;
 
+  // A repair may consume multiple tiers. Do not label aggregate billing with
+  // one attempt's tier, even when the selected answer came from that attempt.
+  const tierFields = model === "grok-4.6" && !retried ? chatServiceTierFields(turn) : {};
   if (wantsStream) {
     const wasStarted = streamStarted;
     startStream();
@@ -913,16 +926,18 @@ async function handleChatCompletions(request, response) {
       }
       emittedDeltaCount = turn.deltas?.length || 0;
     }
-    response.write(OPENAI_ROLE_CHUNK(id, created, model, {}, turn.finishReason));
-    if (turn.usage) {
+    response.write(OPENAI_ROLE_CHUNK(id, created, model, {}, turn.finishReason, tierFields));
+    if (turn.usage || Object.keys(tierFields).length) {
       response.write(
-        `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [], usage: turn.usage })}\n\n`,
+        `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [], usage: turn.usage, ...tierFields })}\n\n`,
       );
     }
     response.write("data: [DONE]\n\n");
     response.end();
   } else {
     const message = { role: "assistant", content: turn.contentText || null };
+    const actualTier = tierFields.provider_specific_fields?.grok_service_tier;
+    if (actualTier) response.setHeader("x-codex-router-grok-service-tier", actualTier);
     if (turn.reasoningText) message.reasoning_content = turn.reasoningText;
     if (turn.toolCalls.length) message.tool_calls = turn.toolCalls;
     writeJson(response, 200, {
@@ -932,6 +947,7 @@ async function handleChatCompletions(request, response) {
       model,
       choices: [{ index: 0, message, finish_reason: turn.finishReason }],
       usage: turn.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      ...tierFields,
     });
   }
 

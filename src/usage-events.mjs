@@ -11,7 +11,7 @@ import path from "node:path";
 import { STATE_DIR } from "./paths.mjs";
 import { canonicalProviderId } from "./provider-selection.mjs";
 import { acceptedInputTokens } from "./context-window-drift.mjs";
-import { usageDiagnosticMetadata } from "./request-diagnostics.mjs";
+import { serviceTierMetadata, usageDiagnosticMetadata } from "./request-diagnostics.mjs";
 
 export const USAGE_EVENTS_PATH = path.join(STATE_DIR, "usage-events.jsonl");
 
@@ -88,6 +88,9 @@ export function recordUsageEvent({
   reasoningTokens,
   totalTokens,
   retries,
+  requestedServiceTier,
+  serviceTier,
+  serviceTierUnknown,
   // True when the upstream stream died after its 200 head was already
   // committed, so `status` had to be rewritten (e.g. 502) and this marker is
   // the only thing that says the turn was truncated rather than successful.
@@ -175,6 +178,7 @@ export function recordUsageEvent({
 }) {
   const diagnostics = usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch });
   const event = {
+    ...serviceTierMetadata({ requestedServiceTier, serviceTier, serviceTierUnknown, retries }),
     meteringVersion: 1,
     at: new Date(at).toISOString(),
     model: safeText(model, "unknown"),
@@ -491,6 +495,7 @@ export function recentUsageEvents({
           grokStructuredPatch: event.grokStructuredPatch,
         });
         return {
+          ...serviceTierMetadata(event),
           ...(event.meteringVersion === 1 ? { meteringVersion: 1 } : {}),
           at: event.at,
           model: safeText(event.model, "unknown"),

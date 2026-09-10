@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   applyResponsesEvent,
+  chatServiceTierFields,
   classifyAfterToolRepair,
   collectResponsesEvents,
   createTurnState,
@@ -414,6 +415,64 @@ test("selectedRetryUsage reports selected context and separate aggregate billing
   assert.equal(usage.retries, 1);
   assert.equal(usage.progress_only_retried, true);
 });
+
+test("collectResponsesEvents keeps known actual service_tier distinct from missing and unknown", () => {
+  const priority = collectResponsesEvents([
+    { type: "response.output_text.delta", delta: "ok" },
+    {
+      type: "response.completed",
+      response: { service_tier: "priority", usage: { input_tokens: 3, output_tokens: 1 } },
+    },
+  ]);
+  assert.equal(priority.serviceTier, "priority");
+  assert.equal(priority.serviceTierUnknown, false);
+  assert.deepEqual(chatServiceTierFields(priority), { service_tier: "priority", provider_specific_fields: { grok_service_tier: "priority" } });
+
+  const standard = collectResponsesEvents([
+    {
+      type: "response.completed",
+      response: { service_tier: "default", usage: { input_tokens: 3, output_tokens: 1 } },
+    },
+  ]);
+  assert.equal(standard.serviceTier, "default");
+  assert.deepEqual(chatServiceTierFields(standard), { service_tier: "default", provider_specific_fields: { grok_service_tier: "default" } });
+
+  const missing = collectResponsesEvents([
+    { type: "response.completed", response: { usage: { input_tokens: 3, output_tokens: 1 } } },
+  ]);
+  assert.equal(missing.serviceTier, undefined);
+  assert.equal(missing.serviceTierUnknown, false);
+  assert.deepEqual(chatServiceTierFields(missing), {});
+
+  const unknown = collectResponsesEvents([
+    {
+      type: "response.completed",
+      response: { service_tier: "flex", usage: { input_tokens: 3, output_tokens: 1 } },
+    },
+  ]);
+  assert.equal(unknown.serviceTier, undefined);
+  assert.equal(unknown.serviceTierUnknown, true);
+  assert.deepEqual(chatServiceTierFields(unknown), { provider_specific_fields: { grok_service_tier: "unknown" } });
+});
+
+test("selectedRetryUsage keeps selected tokens without labeling billed usage as a tier", () => {
+  const usage = selectedRetryUsage(
+    { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+    { prompt_tokens: 11, completion_tokens: 3, total_tokens: 14, service_tier: "priority", billed_service_tier: "priority" },
+  );
+  assert.equal("service_tier" in usage, false);
+  assert.equal("billed_service_tier" in usage, false);
+});
+
+test("mergeMappedUsage omits actual service_tier from aggregated retry billing", () => {
+  const merged = mergeMappedUsage(
+    { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, service_tier: "default" },
+    { prompt_tokens: 11, completion_tokens: 3, total_tokens: 14, service_tier: "priority" },
+  );
+  assert.equal("service_tier" in merged, false);
+  assert.equal(merged.retries, 1);
+});
+
 
 test("mergeMappedUsage adds both attempts and marks retries", () => {
   const merged = mergeMappedUsage(

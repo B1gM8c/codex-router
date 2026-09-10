@@ -3302,6 +3302,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     model: route.gatewayModel,
     input: routedInput,
   };
+  // Locked LiteLLM loses the Responses service_tier argument at its Chat
+  // bridge. extra_body reaches the forwarder without changing other routes.
+  if (route.slug === "grok-oauth/grok-4.6" &&
+      (payload.service_tier === "priority" || payload.service_tier === "default")) {
+    routed.extra_body = { ...(routed.extra_body || {}), service_tier: payload.service_tier };
+  }
   if (routedToolChoice !== payload.tool_choice) routed.tool_choice = routedToolChoice;
   // Codex chooses a child's model; this is where an operator gets to choose its
   // depth. Applied only to turns Codex marked as a child, so a parent
@@ -3727,6 +3733,7 @@ async function handleResponses(request, response, requestUrl) {
       ...activityMetadataFromHeaders(request.headers),
     });
     diagnostics.contextBytes = grokOauth46IngressContextBytes(payload, route);
+    if (route?.slug === "grok-oauth/grok-4.6") diagnostics.requestedServiceTier = payload.service_tier;
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
     // Codex remote compaction V2 uses the ordinary Responses endpoint with a
     // terminal trigger. Detect the protocol shape before route dispatch so the
@@ -4156,6 +4163,7 @@ async function handleResponses(request, response, requestUrl) {
     const upstreamContentType = upstream.headers.get("content-type") || "";
     const createResponsePipeline = (contentType) => {
       const usageObserver = new ResponseUsageTransform(contentType, {
+        grokServiceTier: route?.slug === "grok-oauth/grok-4.6",
         onEvent: (payload) => activity.progress.event(payload),
         estimatedInputTokens:
           ZERO_INPUT_ESTIMATE && route

@@ -2,6 +2,7 @@ import { Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
+import { knownServiceTier } from "./request-diagnostics.mjs";
 
 const MAX_JSON_CAPTURE_BYTES = 8 * 1024 * 1024;
 
@@ -220,12 +221,19 @@ export function mergeTokenUsage(first, second) {
   };
 }
 
-export function tokenUsageFromPayload(payload) {
+export function tokenUsageFromPayload(payload, { grokServiceTier = false } = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  // Forwarder-origin metadata survives the locked LiteLLM Responses bridge;
+  // a request's service_tier is never an authoritative response measurement.
+  const reported = grokServiceTier ? (payload.response || payload)?.provider_specific_fields?.grok_service_tier : undefined;
+  const tier = knownServiceTier(reported);
+  const tierMetadata = tier ? { serviceTier: tier }
+    : reported === "unknown" ? { serviceTierUnknown: true } : {};
   for (const candidate of [payload.usage, payload.response?.usage]) {
     const usage = normalizeTokenUsage(candidate);
-    if (usage) return usage;
+    if (usage) return { ...usage, ...tierMetadata };
   }
+  if (Object.keys(tierMetadata).length) return tierMetadata;
   return undefined;
 }
 
@@ -338,15 +346,17 @@ export class ResponseUsageTransform extends Transform {
   // a fast model read as slow. See #192.
   #firstTokenAt;
   #onEvent;
+  #grokServiceTier;
   #completedResponseObserved = false;
   #terminalErrorObserved = false;
 
   // `estimatedInputTokens` arrives only on routed requests large enough that a
   // reported zero cannot be true. Without it this transform observes and
   // forwards the response byte for byte, exactly as it always did.
-  constructor(contentType = "", { estimatedInputTokens, onEvent } = {}) {
+  constructor(contentType = "", { estimatedInputTokens, onEvent, grokServiceTier = false } = {}) {
     super();
     this.#onEvent = typeof onEvent === "function" ? onEvent : undefined;
+    this.#grokServiceTier = grokServiceTier === true;
     const declared = String(contentType).toLowerCase();
     this.#eventStream = declared.includes("text/event-stream");
     // The ChatGPT backend answers /responses with an SSE body and no
@@ -545,8 +555,13 @@ export class ResponseUsageTransform extends Transform {
     try { this.#onEvent?.(payload); } catch { /* Observer failure is non-fatal. */ }
     this.#noteFirstToken(payload);
     if (payload?.type === "response.completed") this.#completedResponseObserved = true;
-    const usage = tokenUsageFromPayload(payload);
-    if (usage) this.#usage = usage;
+    const usage = tokenUsageFromPayload(payload, { grokServiceTier: this.#grokServiceTier });
+    if (usage) {
+      // A tier-only terminal event must not erase earlier measured counters.
+      this.#usage = usage.inputTokens === undefined
+        ? { ...this.#usage, serviceTier: usage.serviceTier, serviceTierUnknown: usage.serviceTierUnknown }
+        : usage;
+    }
   }
 
   // The first event that carries visible generated text. Reasoning summaries

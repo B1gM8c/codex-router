@@ -55,6 +55,25 @@ test("normalizes Responses and Chat Completions token usage", () => {
   );
 });
 
+test("Grok tier metering uses measured bridge metadata and keeps absence honest", () => {
+  const observe = payload => tokenUsageFromPayload(payload, { grokServiceTier: true });
+  const response = { usage: { input_tokens: 8, output_tokens: 2 }, service_tier: "priority" };
+  assert.equal(observe(response).serviceTier, undefined);
+  response.provider_specific_fields = { grok_service_tier: "default" };
+  assert.equal(observe({ type: "response.completed", response }).serviceTier, "default");
+  assert.equal(tokenUsageFromPayload(response).serviceTier, undefined, "other routes do not interpret Grok metadata");
+  response.provider_specific_fields.grok_service_tier = "unknown";
+  assert.equal(observe(response).serviceTierUnknown, true);
+  response.provider_specific_fields.grok_service_tier = "user text must not be copied";
+  assert.equal(observe(response).serviceTier, undefined);
+  assert.equal(JSON.stringify(observe(response)).includes("user text"), false);
+  const merged = mergeTokenUsage(
+    { inputTokens: 8, outputTokens: 2, totalTokens: 10, serviceTier: "default" },
+    { inputTokens: 8, outputTokens: 2, totalTokens: 10, serviceTier: "priority" },
+  );
+  assert.equal(merged.serviceTier, undefined);
+});
+
 test("captures provider-reported prefix-cache hits when they exist", () => {
   // OpenAI-compatible shape: cached prefix inside input_tokens_details.
   assert.deepEqual(
@@ -877,4 +896,18 @@ test("a ciphertext value carrying escapes ends where JSON says it ends", () => {
       `escape ${JSON.stringify(awkward)} moved the estimate`,
     );
   }
+});
+
+test("Grok tier-only terminal metadata preserves earlier measured token counters", async () => {
+  const events = [
+    { type: "response.in_progress", response: { usage: { input_tokens: 11, output_tokens: 7 } } },
+    { type: "response.completed", response: { provider_specific_fields: { grok_service_tier: "priority" } } },
+  ];
+  const body = events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("");
+  const transform = new ResponseUsageTransform("text/event-stream", { grokServiceTier: true });
+  assert.equal(await passThrough(transform, [body]), body);
+  assert.equal(transform.tokenUsage().inputTokens, 11);
+  assert.equal(transform.tokenUsage().outputTokens, 7);
+  assert.equal(transform.tokenUsage().totalTokens, 18);
+  assert.equal(transform.tokenUsage().serviceTier, "priority");
 });

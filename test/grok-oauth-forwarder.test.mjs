@@ -504,6 +504,43 @@ test("toResponsesRequest sends each duplicated tool name upstream once", () => {
   assert.equal(fileWrites.length, 1);
 });
 
+test("toResponsesRequest copies known service_tier and omits anything else", () => {
+  const priority = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [{ role: "user", content: "ping" }],
+    service_tier: "priority",
+  });
+  assert.equal(priority.service_tier, "priority");
+
+  const standard = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [{ role: "user", content: "ping" }],
+    service_tier: "default",
+  });
+  assert.equal(standard.service_tier, "default");
+
+  const omitted = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [{ role: "user", content: "ping" }],
+  });
+  assert.equal("service_tier" in omitted, false);
+
+  const empty = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [{ role: "user", content: "ping" }],
+    service_tier: "  ",
+  });
+  assert.equal("service_tier" in empty, false);
+
+  const unknown = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [{ role: "user", content: "ping" }],
+    service_tier: "flex",
+  });
+  assert.equal("service_tier" in unknown, false);
+  assert.equal("service_tier" in toResponsesRequest({ model: "grok-4.5", messages: [], service_tier: "priority" }), false);
+});
+
 test("toResponsesRequest aliases view_image only at the Grok boundary", () => {
   const request = toResponsesRequest({
     model: "grok-4.6",
@@ -1070,7 +1107,9 @@ test("retries a progress-only stop once and prefers a retry that calls tools", a
     for await (const chunk of req) chunks.push(chunk);
     bodies.push(Buffer.concat(chunks).toString("utf8"));
     res.writeHead(200, { "Content-Type": "text/event-stream" });
-    res.end(sse(inbound === 1 ? PROGRESS_EVENTS : TOOL_EVENTS));
+    const events = (inbound === 1 ? PROGRESS_EVENTS : TOOL_EVENTS).map(event =>
+      event.response ? { ...event, response: { ...event.response, service_tier: inbound === 1 ? "default" : "priority" } } : event);
+    res.end(sse(events));
   });
   const port = await openPort();
   const dir = mkdtempSync(path.join(os.tmpdir(), "grok-oauth-retry-tools-"));
@@ -1083,6 +1122,7 @@ test("retries a progress-only stop once and prefers a retry that calls tools", a
       headers: auth,
       body: JSON.stringify({
         model: "grok-4.6",
+        service_tier: "priority",
         messages: [
           { role: "system", content: "You are Codex." },
           { role: "user", content: "update the deck" },
@@ -1100,7 +1140,12 @@ test("retries a progress-only stop once and prefers a retry that calls tools", a
     assert.equal(json.usage.completion_tokens, 1_660 + 40);
     assert.equal(json.usage.retries, 1);
     assert.equal(json.usage.progress_only_retried, true);
+    assert.equal(json.service_tier, undefined);
+    assert.equal(json.provider_specific_fields?.grok_service_tier, undefined);
+    assert.equal(resp.headers.get("x-codex-router-grok-service-tier"), null);
+    assert.equal(JSON.parse(bodies[0]).service_tier, "priority");
     const retryBody = JSON.parse(bodies[1]);
+    assert.equal(retryBody.service_tier, "priority");
     assert.equal(retryBody.instructions, "You are Codex.");
     // No prior tool result, so the decline-first nudge stays. See
     // "a finished task ... declines" and the after-tool case below.

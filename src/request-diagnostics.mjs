@@ -80,11 +80,39 @@ export function sanitizeGrokStructuredPatch(value) {
   };
 }
 
-export function usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch } = {}) {
+export const KNOWN_SERVICE_TIERS = Object.freeze(["default", "priority"]);
+
+export function knownServiceTier(value) {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return KNOWN_SERVICE_TIERS.includes(text) ? text : undefined;
+}
+
+export function actualServiceTierFromValue(value) {
+  if (value === undefined || value === null) return { kind: "missing" };
+  if (typeof value !== "string") return { kind: "unknown" };
+  const text = value.trim();
+  if (!text) return { kind: "missing" };
+  const known = knownServiceTier(text);
+  return known ? { kind: "known", value: known } : { kind: "unknown" };
+}
+
+export function serviceTierMetadata({ requestedServiceTier, serviceTier, serviceTierUnknown, retries } = {}) {
+  const requested = knownServiceTier(requestedServiceTier);
+  const actual = knownServiceTier(serviceTier);
+  return {
+    ...(requested ? { requestedServiceTier: requested } : {}),
+    ...(!retries && actual ? { serviceTier: actual } : {}),
+    ...(!retries && !actual && serviceTierUnknown === true ? { serviceTierUnknown: true } : {}),
+  };
+}
+
+export function usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch, requestedServiceTier } = {}) {
   const safeRequestId = safeDiagnosticRequestId(requestId);
   const safeContextBytes = sanitizeContextBytes(contextBytes);
   const safeStructuredPatch = sanitizeGrokStructuredPatch(grokStructuredPatch);
   return {
+    ...serviceTierMetadata({ requestedServiceTier }),
     ...(safeRequestId ? { requestId: safeRequestId } : {}),
     ...(safeContextBytes ? { contextBytes: safeContextBytes } : {}),
     ...(safeStructuredPatch ? { grokStructuredPatch: safeStructuredPatch } : {}),

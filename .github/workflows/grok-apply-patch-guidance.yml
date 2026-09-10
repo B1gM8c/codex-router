@@ -24,7 +24,14 @@ name: Grok apply_patch protocol
       - "src/namespace-relay.mjs"
       - "src/grok-oauth-forwarder.mjs"
       - "src/grok-oauth-turn.mjs"
+      - "src/grok_service_tier_callback.py"
+      - "src/litellm-config.mjs"
+      - "scripts/verify-grok-service-tier.mjs"
+      - "config/grok/oauth/grok-4.6.json"
       - "src/router.mjs"
+      - "src/request-diagnostics.mjs"
+      - "src/response-usage.mjs"
+      - "src/usage-events.mjs"
       - "scripts/verify-grok-apply-patch-guidance.mjs"
       - ".github/workflows/grok-apply-patch-guidance.yml"
   pull_request:
@@ -45,7 +52,14 @@ name: Grok apply_patch protocol
       - "src/namespace-relay.mjs"
       - "src/grok-oauth-forwarder.mjs"
       - "src/grok-oauth-turn.mjs"
+      - "src/grok_service_tier_callback.py"
+      - "src/litellm-config.mjs"
+      - "scripts/verify-grok-service-tier.mjs"
+      - "config/grok/oauth/grok-4.6.json"
       - "src/router.mjs"
+      - "src/request-diagnostics.mjs"
+      - "src/response-usage.mjs"
+      - "src/usage-events.mjs"
       - "scripts/verify-grok-apply-patch-guidance.mjs"
       - ".github/workflows/grok-apply-patch-guidance.yml"
   workflow_dispatch: {}
@@ -135,3 +149,4 @@ jobs:
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --structured
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook --native-hook-endpoint
+          node scripts/verify-grok-service-tier.mjs "$venv_python"

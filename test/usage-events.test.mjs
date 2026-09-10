@@ -526,3 +526,48 @@ test("an empty ledger still returns a full, honest set of hours", async () => {
   assert.ok(buckets.every((bucket) => bucket.requests === 0 && bucket.tokens === 0));
   assert.ok(buckets.every((bucket) => !bucket.measuredTokens && !bucket.measuredBreakdown));
 });
+
+test("records known actual serviceTier without echoing the requested value", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-tier-"));
+  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
+  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
+  try {
+    const usage = await import(`../src/usage-events.mjs?tier=${Date.now()}`);
+    usage.recordUsageEvent({
+      model: "grok-oauth/grok-4.6",
+      provider: "grok-oauth",
+      status: 200,
+      durationMs: 12,
+      requestedServiceTier: "priority",
+      serviceTier: "default",
+      prompt: "never persisted",
+    });
+    usage.recordUsageEvent({
+      model: "grok-oauth/grok-4.6",
+      provider: "grok-oauth",
+      status: 200,
+      durationMs: 13,
+      requestedServiceTier: "flex",
+      serviceTier: "flex",
+    });
+    usage.recordUsageEvent({
+      model: "grok-oauth/grok-4.6",
+      provider: "grok-oauth",
+      status: 200,
+      durationMs: 14,
+      retries: 1,
+      serviceTier: "priority",
+    });
+    const events = usage.recentUsageEvents();
+    assert.equal(events[0].requestedServiceTier, "priority");
+    assert.equal(events[0].serviceTier, "default");
+    assert.equal("serviceTier" in events[1], false);
+    assert.equal("requestedServiceTier" in events[1], false);
+    assert.equal("serviceTier" in events[2], false);
+    assert.equal(events[2].retries, 1);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
+    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
