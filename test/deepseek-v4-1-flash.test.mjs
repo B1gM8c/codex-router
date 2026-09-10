@@ -58,6 +58,22 @@ test("DeepSeek V4.1 Flash on the Nous Portal sizes to the served 262K window", (
   assert.notEqual(model.multiAgentVersion, "v2");
 });
 
+test("DeepSeek V4.1 Flash on Command Code uses the Provider API chat route", () => {
+  const model = MODEL_BY_SLUG.get("commandcode/deepseek-v4.1-flash");
+  assert.ok(model);
+  assert.equal(model.provider, "commandcode");
+  assert.equal(model.upstreamModel, "deepseek/deepseek-v4.1-flash");
+  assert.equal(model.listed, true);
+  assert.deepEqual(model.reasoningLevels.map(({ effort }) => effort), ["low", "high", "max"]);
+  assert.equal(model.contextWindow, 1_000_000);
+  assert.ok(model.contextWindow - model.autoCompact >= MAX_EFFORT_DEFAULT_OUTPUT);
+  // Image input is claimed only in marketing copy, not at the API.
+  assert.deepEqual(model.inputModalities, ["text"]);
+  assert.notEqual(model.multiAgentVersion, "v2");
+  assert.equal(curatedModelProviderId("commandcode", "deepseek/deepseek-v4.1-flash"), "commandcode");
+  assert.equal(curatedModelBlockReason("commandcode", "deepseek/deepseek-v4.1-flash"), undefined);
+});
+
 test("V4.1 Flash is added alongside the V4 routes rather than replacing them", () => {
   for (const [slug, upstreamModel] of [
     ["deepseek/deepseek-v4-flash", "deepseek-v4-flash"],

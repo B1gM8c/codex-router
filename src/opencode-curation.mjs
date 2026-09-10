@@ -185,6 +185,7 @@ const CURATION_ROUTES = Object.freeze({
       "Qwen/Qwen3.8-Max-0902",
       "deepseek/deepseek-v4-flash",
       "deepseek/deepseek-v4-pro",
+      "deepseek/deepseek-v4.1-flash",
       "google/gemini-3.5-flash",
       "google/gemini-3.7-flash",
       "google/gemini-3.8-flash",

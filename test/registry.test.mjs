@@ -54,6 +54,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "clinepass/qwen3.8-max",
       "commandcode/deepseek-v4-flash",
       "commandcode/deepseek-v4-pro",
+      "commandcode/deepseek-v4.1-flash",
       "commandcode/fugu-ultra",
       "commandcode/gemini-3.5-flash",
       "commandcode/gemini-3.7-flash",
