@@ -172,3 +172,43 @@ test('CLI exports metrics without input contents and creates an owner-only repor
   assert.equal(invalid.status, 1);
   assert.ok(!invalid.stderr.includes('CANARY'));
 });
+
+const activity = (requestId, threadId = 'worker') => ({
+  requestId, threadId, startedAt: Date.parse(at(1)), endedAt: Date.parse(at(5)),
+});
+
+test('structuredPatch counts correlated usage records, not unique request IDs', () => {
+  const secret = 'PRIVATE_STRUCTURED_PATCH_CANARY';
+  const report = buildGrokRunReport({ threadId: 'worker', startedAt: at(0), endedAt: at(10),
+    activityEvents: [{ recent: [activity('r1'), activity('other', 'foreign')] }],
+    usageEvents: [
+      { requestId: 'r1', grokStructuredPatch: { enabled: true, applied: true, schemaVersion: 1 } },
+      { requestId: 'r1', grokStructuredPatch: { enabled: true, applied: false, schemaVersion: 1, mode: 'client_hook' } },
+      { requestId: 'r1', grokStructuredPatch: { enabled: false, applied: false, schemaVersion: 1 } },
+      { requestId: 'r1' },
+      { requestId: 'r1', grokStructuredPatch: { enabled: false, applied: true, schemaVersion: 1 } },
+      { requestId: 'r1', grokStructuredPatch: { enabled: true, applied: true, schemaVersion: 1, mode: 'private prompt' } },
+      { requestId: 'r1', grokStructuredPatch: {
+        enabled: true, applied: true, schemaVersion: 1, prompt: secret, command: secret, path: secret, requestId: 'r1',
+      } },
+      { requestId: 'unmatched', grokStructuredPatch: { enabled: true, applied: true, schemaVersion: 1, mode: 'client_hook' } },
+      { requestId: 'other', grokStructuredPatch: { enabled: true, applied: true, schemaVersion: 1 } },
+    ] });
+  assert.deepEqual(report.structuredPatch, {
+    unit: 'usage_records', total: 7, reported: 4, missing: 3, enabled: 3, applied: 2, clientHook: 1,
+  });
+  assert.equal(report.requests.correlatedUsageRecords, 7);
+  assert.ok(!JSON.stringify(report).includes(secret));
+  assert.ok(!JSON.stringify(report.structuredPatch).includes('r1'));
+});
+
+test('Grok CLI reports no Router structuredPatch evidence', () => {
+  const report = buildGrokRunReport({ sessionId: 'cli', threadId: 'worker', startedAt: at(0), endedAt: at(10),
+    grokEvents: [{ type: 'usage', usage: { output_tokens: 4 } }],
+    activityEvents: [{ recent: [activity('r1')] }],
+    usageEvents: [{ requestId: 'r1', grokStructuredPatch: { enabled: true, applied: true, schemaVersion: 1, mode: 'client_hook' } }],
+  });
+  assert.equal(report.harness, 'grok-cli');
+  assert.equal(report.requests.correlatedUsageRecords, 1);
+  assert.equal(report.structuredPatch, null);
+});

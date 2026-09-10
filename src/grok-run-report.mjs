@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { sanitizeGrokStructuredPatch } from './request-diagnostics.mjs';
 
 const count = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 const timestamp = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? Date.parse(value) : count(value);
@@ -27,6 +28,22 @@ function unionMs(intervals) {
     else merged.push([a, b]);
   }
   return merged.reduce((sum, [a, b]) => sum + b - a, 0);
+}
+
+function structuredPatchCounts(usage) {
+  let reported = 0, enabled = 0, applied = 0, clientHook = 0;
+  for (const row of usage) {
+    const patch = sanitizeGrokStructuredPatch(row.grokStructuredPatch);
+    if (!patch) continue;
+    reported++;
+    if (patch.enabled) enabled++;
+    if (patch.applied) applied++;
+    if (patch.mode === 'client_hook') clientHook++;
+  }
+  return {
+    unit: 'usage_records', total: usage.length, reported, missing: usage.length - reported,
+    enabled, applied, clientHook,
+  };
 }
 
 // Explicit projection only: never copy prompts, tool arguments/results, reasoning,
@@ -156,6 +173,8 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
       patchFailures: cli ? null : patchFailures, durationMs: toolIntervals.length ? unionMs(toolIntervals) : null,
       firstTestAfterMs: start !== undefined && firstTestAt !== undefined ? firstTestAt - start : null },
     contextBytes: { unit: 'utf8_json_bytes', first: bytes[0] ?? null, last: bytes.at(-1) ?? null },
+    // Counts already-correlated usage records only. Never copy metadata, request IDs, or prompt/code.
+    structuredPatch: cli ? null : structuredPatchCounts(usage),
     limitations: ['Completion is the worker status; test success and independent review must be recorded separately.',
       'Byte sizes are not token estimates. Partial or unmatched counters do not establish throughput.',
       'Unobserved time includes scheduling and uninstrumented work; it is not proven provider waiting time.',
