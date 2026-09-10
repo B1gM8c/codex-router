@@ -11,6 +11,7 @@ import {
   flattenToolChoice,
   NamespaceToolCallTransform,
   rewriteNamespaceResponsePayload,
+  restorePreflattenedToolNamespaces,
   strictOpenCodeCompactionInput,
 } from "../src/namespace-relay.mjs";
 import { deepSeekCustomToolNames } from "../src/deepseek-responses.mjs";
@@ -89,6 +90,39 @@ test("namespaced custom tools preserve exact input, choice and output identity",
   }
 });
 
+test("flat custom history does not hijack an ordinary tool with the same wire name", () => {
+  const wireName = "functions__exec";
+  for (const plainType of ["custom", "function"]) {
+    const tools = [
+      { type: "namespace", name: "functions", tools: [{ type: "custom", name: "exec" }] },
+      { type: plainType, name: wireName, ...(plainType === "function" ? { parameters: { type: "object" } } : {}) },
+    ];
+    const input = [{ type: "custom_tool_call", name: wireName, call_id: "plain_prior", input: "plain input" }];
+    const choice = { type: "custom", name: wireName };
+    const flattened = flattenNamespaceTools(tools, { maxNameLength: 64 });
+    const bridged = bridgeCustomTools(flattened.tools, input, flattened.namespaces, choice,
+      deepSeekCustomToolNames(flattened.tools, input, choice), { maxNameLength: 64 });
+    const lookups = buildNamespaceLookups(flattened.namespaces);
+    const history = flattenNamespacedHistory(bridged.input, flattened.namespaces);
+    assert.notEqual(history[0].name, bridged.tools[0].name,
+      "the unqualified prior call must not use the namespaced exec alias");
+    assert.equal(bridged.toolChoice.name, history[0].name);
+    const restored = rewriteNamespaceResponsePayload({ output: [sourceCall(history[0].name, "plain input")] }, lookups).output[0];
+    assert.equal(restored.type, "custom_tool_call");
+    assert.equal(restored.name, wireName);
+    assert.equal(restored.namespace, undefined);
+    assert.equal(restored.input, "plain input");
+    const native = rewriteNamespaceResponsePayload({ output: [sourceCall(bridged.tools[0].name)] }, lookups).output[0];
+    assert.equal(native.name, "exec");
+    assert.equal(native.namespace, "functions");
+    if (plainType === "function") {
+      const call = sourceCall(bridged.tools[1].name);
+      const payload = { output: [call] };
+      assert.deepEqual((rewriteNamespaceResponsePayload(payload, lookups) || payload).output[0], call);
+    }
+  }
+});
+
 test("bounded namespaced custom aliases remain consistent in allowed-tools choices", () => {
   const namespace = "namespace_with_a_long_but_valid_native_identity";
   const name = "freeform_tool_with_a_long_native_name";
@@ -108,6 +142,64 @@ test("bounded namespaced custom aliases remain consistent in allowed-tools choic
     buildNamespaceLookups(flattened.namespaces)).output[0];
   assert.equal(output.name, name);
   assert.equal(output.namespace, namespace);
+});
+
+test("pre-flattened custom exec preserves bounded aliases, history, choices and exact input", () => {
+  const namespace = "native_runtime_with_a_long_but_valid_client_namespace";
+  const name = "exec";
+  const wireName = `${namespace}__${name}`;
+  const definition = { type: "custom", name: wireName, description: "Execute supplied text.",
+    format: { type: "grammar", syntax: "lark", definition: "start: /[\\s\\S]+/" } };
+  const metadata = { "x-codex-turn-metadata": JSON.stringify({ tool_namespaces_info: {
+    [namespace]: { name: namespace, functions: { [name]: { name, direct: true, source: { kind: "harness" } } } },
+  } }) };
+  const rawInput = 'text("مرحبا");\n// Preserve \\ and "quotes" exactly.\n';
+  const history = [
+    { type: "custom_tool_call", namespace, name, call_id: "prior_exec", input: rawInput },
+    { type: "custom_tool_call_output", call_id: "prior_exec", output: "done" },
+  ];
+  const choice = { type: "custom", namespace, name };
+  let firstProviderName;
+  for (const [collision, preflattened] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const extra = collision ? [{ type: "function", name: firstProviderName, parameters: { type: "object" } }] : [];
+    const tools = [definition, ...extra];
+    const original = structuredClone(tools);
+    const restored = restorePreflattenedToolNamespaces(tools, metadata);
+    assert.deepEqual(restored[0].tools[0], { ...definition, name });
+    assert.deepEqual(tools, original);
+    const flattened = flattenNamespaceTools(restored, { maxNameLength: 64 });
+    const prior = preflattened
+      ? [{ type: "custom_tool_call", name: wireName, call_id: "prior_exec", input: rawInput }, history[1]]
+      : history;
+    const forced = preflattened ? { type: "custom", name: wireName } : choice;
+    const bridged = bridgeCustomTools(flattened.tools, prior, flattened.namespaces, forced,
+      deepSeekCustomToolNames(flattened.tools, prior, forced), { maxNameLength: 64 });
+    const providerName = bridged.tools[0].name;
+    assert.ok(providerName.length <= 64);
+    if (collision) assert.notEqual(providerName, firstProviderName);
+    else firstProviderName = providerName;
+    assert.equal(new Set(bridged.tools.map((tool) => tool.name)).size, bridged.tools.length);
+    const sent = flattenNamespacedHistory(bridged.input, flattened.namespaces);
+    assert.equal(sent[0].name, providerName);
+    assert.equal(sent[0].namespace, undefined);
+    assert.equal(JSON.parse(sent[0].arguments).input, rawInput);
+    assert.deepEqual(sent[1], { type: "function_call_output", call_id: "prior_exec", output: "done" });
+    assert.deepEqual(flattenToolChoice(bridged.toolChoice, flattened.namespaces), { type: "function", name: providerName });
+    const output = rewriteNamespaceResponsePayload({ output: [sourceCall(providerName, rawInput)] },
+      buildNamespaceLookups(flattened.namespaces)).output[0];
+    assert.equal(output.type, "custom_tool_call");
+    assert.equal(output.namespace, namespace);
+    assert.equal(output.name, name);
+    assert.equal(output.input, rawInput);
+    if (collision) {
+      const plainCall = sourceCall(bridged.tools[1].name, "ordinary function");
+      const payload = { output: [plainCall] };
+      const rewritten = rewriteNamespaceResponsePayload(payload, buildNamespaceLookups(flattened.namespaces)) || payload;
+      assert.deepEqual(rewritten.output[0], plainCall, "an ordinary function must not become a custom exec");
+    }
+  }
+  assert.equal(history[0].input, rawInput);
+  assert.deepEqual(choice, { type: "custom", namespace, name });
 });
 
 test("namespaced custom apply_patch history remains paired during compaction", () => {
