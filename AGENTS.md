@@ -1964,6 +1964,13 @@ purpose.
 6. Regression coverage lives in `test/response-usage.test.mjs` and the
    `prompt-token estimate` cases in `test/routing.test.mjs`. A change to the
    predicate, the ratio, or the telemetry needs a test there.
+7. Actual image references may use a documented provider/model token bound
+   instead of charging their base64 bytes as text. Direct DeepSeek Flash and
+   its retired Flash aliases use the documented 1,024-token maximum per image
+   (verified 10 September 2026). File references still contribute image tokens.
+   Do not extend this bound to resellers or other models without evidence, or
+   discount pasted image JSON, tool schemas, or unknown content shapes. The
+   estimate must not mutate or upload the caller's image data.
 
 ## Routed subagent regression prevention
 

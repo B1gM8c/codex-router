@@ -7734,6 +7734,81 @@ test("routed compaction resolves subagent handoffs before summarizing", async ()
   }
 });
 
+test("direct DeepSeek screenshots do not saturate the prompt-token estimate", async () => {
+  let reportedInputTokens = 0;
+  const gatewayBodies = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayBodies.push(await bodyJson(request));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\ndata: ${JSON.stringify({
+      type: "response.completed",
+      response: { id: "resp_image", usage: {
+        input_tokens: reportedInputTokens, output_tokens: 12, total_tokens: reportedInputTokens + 12,
+      } },
+    })}\n\ndata: [DONE]\n\n`);
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-image-estimate-"));
+  // The canonical name is currently a curated route; keep the checked-in
+  // legacy vision route as the fixture's capability baseline.
+  const legacy = JSON.parse(readFileSync(
+    path.join(root, "config/deepseek/deepseek-v4-flashvision-exp.json"), "utf8",
+  )).models[0];
+  const userModels = path.join(stateDir, "user-models.json");
+  writeFileSync(userModels, JSON.stringify({ version: 1, models: [{
+    ...legacy,
+    slug: "deepseek/deepseek-flash",
+    gatewayModel: "deepseek-flash",
+    upstreamModel: "deepseek-flash",
+    compHash: "deepseek-flash-image-estimate-fixture",
+  }] }));
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    MODEL_ROUTER_USER_MODELS: userModels,
+  });
+  const image_url = `data:image/png;base64,${"A".repeat(3_600_000)}`;
+  const body = JSON.stringify({
+    model: "deepseek/deepseek-flash",
+    input: [{ role: "user", content: [
+      { type: "input_text", text: "Inspect this screenshot." },
+      { type: "input_image", image_url },
+    ] }],
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const reported of [0, 4321]) {
+      reportedInputTokens = reported;
+      const response = await fetch(`${routerBase(routerPort)}/responses`, {
+        method: "POST",
+        headers: { Authorization: "Bearer CODEX_CALLER_SECRET", "Content-Type": "application/json" },
+        body,
+      });
+      assert.equal(response.status, 200);
+      const completed = JSON.parse((await response.text()).split("\n")
+        .find((line) => line.startsWith("data:") && line.includes("response.completed")).slice(5));
+      const count = completed.response.usage.input_tokens;
+      if (reported === 0) assert.ok(count >= 1024 && count < 2000, `image estimate was ${count}`);
+      else assert.equal(count, reported);
+      const events = await waitForUsageEvents(stateDir, reported === 0 ? 1 : 2, router);
+      assert.equal(events.at(-1).inputTokens, reported);
+      assert.equal(events.at(-1).estimatedInputTokens, reported === 0 ? count : undefined);
+      assert.equal(completed.response.usage.total_tokens, count + 12);
+      // Accounting must never replace the actual screenshot with a placeholder.
+      const images = gatewayBodies.at(-1).input.flatMap((item) => item.content || [])
+        .filter((part) => part.type === "input_image");
+      assert.equal(images.length, 1);
+      assert.equal(images[0].image_url, image_url);
+      assert.equal(gatewayBodies.at(-1).model, "deepseek-flash");
+    }
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 // Issue #95: opencode's Go endpoint reports `input_tokens: 0` for its DeepSeek
 // V4 models, so Codex's context counter never climbs, auto-compaction never
 // fires, and the provider eventually rejects the turn at its real limit. Codex

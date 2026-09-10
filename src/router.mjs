@@ -102,6 +102,7 @@ import {
   readProviderSelection,
   selectedConfiguredListedModels,
 } from "./provider-selection.mjs";
+import { maxImageTokensForRoute } from "./prompt-image-usage.mjs";
 import {
   estimateInputTokens,
   mergeTokenUsage,
@@ -4095,7 +4096,10 @@ async function handleResponses(request, response, requestUrl) {
       const usageObserver = new ResponseUsageTransform(contentType, {
         estimatedInputTokens:
           ZERO_INPUT_ESTIMATE && route
-            ? estimateInputTokens(routedBody, { contextWindow: route.contextWindow })
+            ? estimateInputTokens(routedBody, {
+                contextWindow: route.contextWindow,
+                maxTokensPerImage: maxImageTokensForRoute(route),
+              })
             : undefined,
       });
       const transforms = [usageObserver];
