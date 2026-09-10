@@ -119,7 +119,7 @@ test("rendered catalog keeps Fast opt-in on grok-oauth/grok-4.6 and leaves Grok 
     default_service_tier: "priority",
   };
   const grok46 = routedModel(nativeTemplate, MODEL_BY_SLUG.get("grok-oauth/grok-4.6"));
-  assert.deepEqual(grok46.service_tiers, [{ id: "priority", name: "Fast" }]);
+  assert.deepEqual(grok46.service_tiers, [{ id: "priority", name: "Fast", description: "Use priority processing when available." }]);
   assert.equal(grok46.default_service_tier, null);
 
   const grok45 = routedModel(nativeTemplate, MODEL_BY_SLUG.get("grok-oauth/grok-4.5"));
