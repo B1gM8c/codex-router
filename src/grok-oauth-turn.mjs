@@ -1,3 +1,7 @@
+import {
+  actualServiceTierFromValue,
+} from "./request-diagnostics.mjs";
+
 // SSE joins repeated `data:` fields with a line feed before dispatch.
 // Reading only the first field truncates multiline JSON.
 export function sseDataFromBlock(rawEvent) {
@@ -95,7 +99,7 @@ export function isProgressOnlyStop(
     afterToolResult = false,
   } = {},
 ) {
-  if (!turn || (turn.toolCalls && turn.toolCalls.length > 0)) return false;
+  if (turn?.terminalStatus !== "completed" || turn.toolCalls?.length > 0) return false;
   // After a tool result, prose alone is never accepted as proof of completion.
   // It is repaired into either another client tool call or an internal final
   // answer, regardless of length. This is the invariant that prevents a long
@@ -110,7 +114,7 @@ export function isProgressOnlyStop(
 // Prefer the retry only when it actually called a tool. A second short
 // status sentence is not an improvement; keep the first answer.
 export function shouldPreferRetryTurn(second) {
-  return Boolean(second?.toolCalls?.length);
+  return second?.terminalStatus === "completed" && Boolean(second.toolCalls?.length);
 }
 
 // A repair turn after a tool result is a protocol decision, not a prose
@@ -118,6 +122,10 @@ export function shouldPreferRetryTurn(second) {
 // answer tool call requested above. Anything else is an invalid repair
 // and must become a visible router error rather than a clean `stop`.
 export function classifyAfterToolRepair(second) {
+  // An item-level close only finishes that call's arguments. It does not
+  // certify the response: failed, incomplete, and truncated attempts can all
+  // contain a complete-looking client call or private final-answer call.
+  if (second?.terminalStatus !== "completed") return { action: "fail" };
   const calls = Array.isArray(second?.toolCalls) ? second.toolCalls : [];
   if (calls.length !== 1) return { action: "fail" };
   const [call] = calls;
@@ -139,6 +147,8 @@ export function classifyAfterToolRepair(second) {
 export function selectedRetryUsage(first, second) {
   const selected = second || first;
   const usage = selected ? { ...selected } : {};
+  delete usage.service_tier;
+  delete usage.billed_service_tier;
   const billedPromptTokens =
     (first?.prompt_tokens || 0) + (second?.prompt_tokens || 0);
   const billedCompletionTokens =
@@ -230,9 +240,29 @@ export function createTurnState({ toolNameMapper = (name) => name } = {}) {
     toolCalls: [],
     toolByItemId: new Map(),
     usage: undefined,
+    serviceTier: undefined,
+    serviceTierUnknown: false,
+    terminalStatus: undefined,
     deltas: [],
     toolNameMapper,
   };
+}
+
+export function chatServiceTierFields(turn) {
+  // LiteLLM's Responses bridge drops the standard Chat field but preserves
+  // provider_specific_fields. Carry only provider-reported bounded metadata.
+  if (turn?.serviceTierUnknown) return { provider_specific_fields: { grok_service_tier: "unknown" } };
+  if (turn?.serviceTier) return {
+    service_tier: turn.serviceTier,
+    provider_specific_fields: { grok_service_tier: turn.serviceTier },
+  };
+  return {};
+}
+
+function attachActualServiceTier(state, response) {
+  const actual = actualServiceTierFromValue(response?.service_tier);
+  state.serviceTier = actual.kind === "known" ? actual.value : undefined;
+  state.serviceTierUnknown = actual.kind === "unknown";
 }
 
 export function mapUpstreamUsage(usage) {
@@ -330,6 +360,9 @@ function ensureToolCall(state, item, itemId, { complete = false } = {}) {
 
 export function applyResponsesEvent(state, event) {
   if (!event || typeof event !== "object") return state;
+  // Once an upstream failure is known, later frames cannot revive this turn
+  // or add actions to it. In particular, [DONE] is never success evidence.
+  if (state.terminalStatus === "failed" || state.terminalStatus === "incomplete") return state;
   switch (event.type) {
     case "response.output_text.delta": {
       if (event.delta) {
@@ -381,7 +414,25 @@ export function applyResponsesEvent(state, event) {
       break;
     }
     case "response.completed": {
+      const status = event.response?.status;
+      state.terminalStatus = !status || status === "completed"
+        ? "completed"
+        : status === "failed" ? "failed" : "incomplete";
       state.usage = mapUpstreamUsage(event.response?.usage);
+      attachActualServiceTier(state, event.response);
+      break;
+    }
+    case "response.failed":
+    case "error": {
+      state.terminalStatus = "failed";
+      state.usage = mapUpstreamUsage(event.response?.usage);
+      attachActualServiceTier(state, event.response);
+      break;
+    }
+    case "response.incomplete": {
+      state.terminalStatus = "incomplete";
+      state.usage = mapUpstreamUsage(event.response?.usage);
+      attachActualServiceTier(state, event.response);
       break;
     }
     default:
@@ -391,14 +442,20 @@ export function applyResponsesEvent(state, event) {
 }
 
 export function finalizeTurn(state) {
-  backfillToolArgumentDeltas(state);
+  const terminalStatus = state.terminalStatus || "missing";
+  if (terminalStatus === "completed") backfillToolArgumentDeltas(state);
   return {
     contentText: state.contentText,
     reasoningText: state.reasoningText,
     toolCalls: state.toolCalls,
     usage: state.usage,
+    serviceTier: state.serviceTier,
+    serviceTierUnknown: state.serviceTierUnknown === true,
     deltas: state.deltas,
-    finishReason: state.toolCalls.length ? "tool_calls" : "stop",
+    terminalStatus,
+    finishReason: terminalStatus === "completed"
+      ? state.toolCalls.length ? "tool_calls" : "stop"
+      : null,
   };
 }
 

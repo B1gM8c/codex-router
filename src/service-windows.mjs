@@ -24,6 +24,7 @@ import {
 import { ensureCheckoutReadable, protectPrivateFile } from "./file-security.mjs";
 import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-environment.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
+import { serviceGrokPatchHookEnvironment } from "./grok-patch-hook-settings.mjs";
 import {
   skipServiceManagerCall,
   assertServiceWriteIsolated,
@@ -84,6 +85,7 @@ function wrapper() {
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
+    ...serviceGrokPatchHookEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     // The LiteLLM gateway is a Python process. Force UTF-8 output so its
     // startup banner and logs do not crash on Windows systems whose default
