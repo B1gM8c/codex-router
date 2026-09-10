@@ -150,6 +150,8 @@ try {
   }
   gateway = start(python, ["-c", "import importlib.metadata; assert importlib.metadata.version('litellm') == '1.96.0'; from litellm import run_server; run_server()", "--config", configPath, "--host", "127.0.0.1", "--port", String(gatewayPort)], {
     LITELLM_LOCAL_MODEL_COST_MAP: "True", DATABASE_URL: undefined, LITELLM_MASTER_KEY: key,
+    // Match production startup: LiteLLM prints Unicode on Windows too.
+    PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
   });
   await ready(`http://127.0.0.1:${gatewayPort}/health/liveliness`, gateway);
   router = start(process.execPath, [path.join(root, "src/router.mjs")], {
