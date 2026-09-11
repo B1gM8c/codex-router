@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Preserve tool calls after large fragmented response preludes.** Allow one
+  unfinished initial event within the existing 10 MiB bound and match the
+  namespace relay's limit, so later MCP calls retain their client identities.
+  Prelude timeouts, empty-completion checks and retry safety remain intact.
 - **DeepSeek empty-completion guard allows large reasoning after liveness
   release.** Issue #684: Direct DeepSeek V4.1 Flash MCP turns with large
   reasoning deltas no longer hit the empty-completion byte limit prematurely.
