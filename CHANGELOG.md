@@ -63,6 +63,25 @@
   e.g. 150 output against 499 reasoning), so the inclusive total is rebuilt
   first instead of clamping the sample to zero and silently dropping it.
   Provider totals and billing are unchanged.
+- **Meta API routes for Muse Spark 1.3 and its Contributor tier.**
+  `meta/muse-spark-1.3` and `meta/muse-spark-1.3-contributor` mirror the Muse
+  Spark 1.2 Meta routes: 1M context compacting at 900K, text and image input,
+  the minimal-to-xhigh ladder defaulting to high, reasoning summaries, and
+  `auto-tool-choice`. Meta's model page documents both ids, the window, and
+  image input; the Contributor tier is cheaper because Meta may use its traffic
+  to improve its products.
+- **Command Code route for Muse Spark 1.3.** `commandcode/muse-spark-1.3`
+  follows `commandcode/muse-spark-1.2`: 1M context compacting at 900K, text and
+  image input, `auto-tool-choice`, and only the `high` effort, because Command
+  Code does not document effort values. Command Code also lists the
+  Contributor tier, but no Command Code Contributor route is checked in for
+  either version; it remains available through `bin/curate-models commandcode`.
+- **OpenRouter route for DeepSeek V4.1 Flash.**
+  `openrouter/deepseek-v4.1-flash` takes OpenRouter's catalog values (1,048,576
+  context, text and image input, low/high/max) and compacts at 900K to keep
+  DeepSeek's 128K max-effort completion. It carries `auto-tool-choice` because
+  DeepSeek rejects forced tool choices in thinking mode. Live verification has
+  not been run; see `docs/research/deepseek-v4-1-flash-2026-09-11.md`.
 - **Preserve tool calls after large fragmented response preludes.** Allow one
   unfinished initial event within the existing 10 MiB bound and match the
   namespace relay's limit, so later MCP calls retain their client identities.
