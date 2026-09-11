@@ -9,7 +9,7 @@ import { curatedModelBlockReason, curatedModelProviderId } from "../src/opencode
 const MAX_EFFORT_DEFAULT_OUTPUT = 128_000;
 
 test("DeepSeek V4.1 Flash on the direct API publishes its documented capabilities", () => {
-  const model = MODEL_BY_SLUG.get("deepseek/deepseek-flash");
+  const model = MODEL_BY_SLUG.get("deepseek/deepseek-v4.1-flash");
   assert.ok(model);
   assert.equal(model.provider, "deepseek");
   assert.equal(model.upstreamModel, "deepseek-flash");
