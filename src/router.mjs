@@ -2438,6 +2438,17 @@ function sanitizeCollaborationForNative(item) {
   };
 }
 
+// The native endpoint validates an item's optional `id` against the prefix it
+// mints for that item type ("Expected an ID that begins with 'fc'"). Routed
+// providers mint their own (`call_...`, `tool_...`, `chatcmpl-...`), and Codex
+// saves and replays them. Native-minted IDs always carry these prefixes, so a
+// native-only history is forwarded unchanged.
+const NATIVE_ITEM_ID_PREFIXES = new Map([
+  ["function_call", "fc"],
+  ["custom_tool_call", "ctc"],
+  ["message", "msg"],
+]);
+
 function normalizeNativeInput(
   input,
   { statelessReasoning = false, dropUnstoredReasoningReferences = false } = {},
@@ -2463,14 +2474,15 @@ function normalizeNativeInput(
     }
 
     // ------------------------------------------------------------
-    // External providers can reuse their call_id as an item ID that OpenAI
-    // rejects. Omit only that optional ID on native replay, including saved
-    // history and compaction; call_id must still pair the call with its result.
+    // Omit only a foreign optional item ID on native replay, including saved
+    // history and compaction. call_id is separate and must still pair each
+    // call with its result.
     // ------------------------------------------------------------
 
-    if (item?.type === "function_call" && typeof item.id === "string" && !item.id.startsWith("fc")) {
-      const { id: _providerId, ...call } = item;
-      item = call;
+    const nativeIdPrefix = NATIVE_ITEM_ID_PREFIXES.get(item?.type);
+    if (nativeIdPrefix && typeof item.id === "string" && !item.id.startsWith(nativeIdPrefix)) {
+      const { id: _providerId, ...rest } = item;
+      item = rest;
     }
     if (item?.type !== "compaction") return [sanitizeCollaborationForNative(item)];
     return [isRouterCompactionValue(item.encrypted_content)

@@ -2606,17 +2606,25 @@ test("compaction never treats reasoning as final text and falls back to chat con
 // The optional item ID is separate from the call_id that pairs each result.
 // ------------------------------------------------------------
 
-test("native function-call IDs omit incompatible IDs without changing call-result pairs", async (t) => {
+test("native replay omits incompatible item IDs without changing call-result pairs", async (t) => {
   const nativeRequests = [];
   const gatewayRequests = [];
+  const nativePrefixes = { function_call: "fc", custom_tool_call: "ctc", message: "msg" };
   const native = await mockServer(async (request, response) => {
     const body = await bodyJson(request);
     nativeRequests.push({ url: request.url, headers: request.headers, body });
     const invalid = body.input.find((item) =>
-      item?.type === "function_call" && typeof item.id === "string" && !item.id.startsWith("fc")
+      Object.hasOwn(nativePrefixes, item?.type) &&
+      typeof item.id === "string" &&
+      !item.id.startsWith(nativePrefixes[item.type])
     );
     if (invalid) {
-      json(response, 400, { error: { type: "invalid_request_error", message: "Expected an ID that begins with 'fc'." } });
+      json(response, 400, {
+        error: {
+          type: "invalid_request_error",
+          message: `Expected an ID that begins with '${nativePrefixes[invalid.type]}'.`,
+        },
+      });
       return;
     }
     json(response, 200, { route: "native" });
@@ -2678,14 +2686,28 @@ test("native function-call IDs omit incompatible IDs without changing call-resul
     input.push({ ...call, ...fields.input }, output);
     expected.push({ ...call, ...fields.expected }, output);
   }
-  const untouched = [
-    { type: "custom_tool_call", id: "tool_custom", call_id: "custom_pair", name: "custom_fixture", input: "fixture" },
-    { type: "custom_tool_call_output", id: "custom_result", call_id: "custom_pair", output: "fixture result" },
-    { type: "item_reference", id: "tool_reference" },
-    { type: "message", id: "tool_message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  // Custom tool calls and messages are validated against their own prefixes.
+  // Outputs and item references are not, and must stay byte-identical.
+  const withoutId = ({ id: _id, ...item }) => item;
+  const customCall = { type: "custom_tool_call", call_id: "custom_pair", name: "custom_fixture", input: "fixture" };
+  const nativeCustomCall = { ...customCall, id: "ctc_native_example", call_id: "custom_native" };
+  const userMessage = { type: "message", id: "tool_message", role: "user", content: [{ type: "input_text", text: "continue" }] };
+  const routedReply = { type: "message", id: "chatcmpl-example", role: "assistant", content: [{ type: "output_text", text: "routed" }] };
+  const nativeReply = { ...routedReply, id: "msg_native_example", content: [{ type: "output_text", text: "native" }] };
+  const otherItems = [
+    [{ ...customCall, id: "tool_custom" }, customCall],
+    [{ type: "custom_tool_call_output", id: "custom_result", call_id: "custom_pair", output: "fixture result" }],
+    [nativeCustomCall],
+    [{ type: "custom_tool_call_output", id: "custom_native_result", call_id: "custom_native", output: "native result" }],
+    [{ type: "item_reference", id: "tool_reference" }],
+    [routedReply, withoutId(routedReply)],
+    [nativeReply],
+    [userMessage, withoutId(userMessage)],
   ];
-  input.push(...untouched);
-  expected.push(...untouched);
+  for (const [original, normalized = original] of otherItems) {
+    input.push(original);
+    expected.push(normalized);
+  }
 
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);

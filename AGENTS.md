@@ -2063,6 +2063,16 @@ xAI and Codex has its own idle limit. The router's post-prologue stall guard
   value that passes byte-identical. Do not gate this on a router-written
   sentinel: the router never authors these items, and a marker would strand
   the already-broken conversations this recovers.
+- The native endpoint also checks an optional item `id` against the prefix it
+  mints for that item type: `fc` for function calls, `ctc` for custom tool
+  calls, `msg` for messages. Codex saves and replays the IDs routed providers
+  minted (`call_...`, `tool_...`, `chatcmpl-...`), so a conversation moved back
+  to a native model fails with "Expected an ID that begins with 'fc'" once one
+  is in its history. `normalizeNativeInput` omits only a string `id` without
+  that prefix, on `/responses` and `/responses/compact` alike. `call_id` still
+  pairs each call with its result, a native-only history is forwarded
+  unchanged, and routed requests keep their IDs. The `native replay omits
+  incompatible item IDs` case in `test/routing.test.mjs` holds both sides.
 - Never log relay response bodies, decrypted task text, or exception messages
   that can echo either. Regressions require fragmented/mislabeled SSE tests and
   real marker-return probes through every installed routed agent plus a
