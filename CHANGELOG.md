@@ -2,6 +2,85 @@
 
 ## Unreleased
 
+- **DeepSeek V4.1 Flash is available on four providers, alongside V4.**
+  DeepSeek released V4.1 Flash on 2026-09-10. New routes:
+  `deepseek/deepseek-flash` (1M window, image input, thinking with
+  low/high/max), `opencode-go/deepseek-v4.1-flash` (OpenCode's renamed id;
+  the launch-day `deepseek-flash` id is deprecated and not routed),
+  `nousresearch/deepseek-v4.1-flash` (sized to the Portal's served 262,144
+  window), and `commandcode/deepseek-v4.1-flash` (text-only until image input
+  is verified at the Provider API). Every V4 route stays listed. On the
+  DeepSeek API the V4 Flash ids are now served by V4.1 Flash, and from
+  2026-09-14 04:00 UTC `deepseek-v4-pro` requests are served by V4.1 Flash too.
+  Ollama Cloud and ClinePass do not offer V4.1 Flash yet. Evidence is in
+  `docs/research/deepseek-v4-1-flash-2026-09-11.md`.
+
+- **The ChatGPT Web provider is removed: using it risked an OpenAI account
+  ban.** `chatgpt-web` routed Codex turns into an unofficial browser automation
+  of chatgpt.com, driven through a separately installed launcher on loopback
+  port 17841. Automating a ChatGPT account that way is outside OpenAI's terms of
+  service, and enforcement falls on the signed-in account: a suspension or
+  permanent ban costs the operator their ChatGPT subscription and their Codex
+  access with it. That is not a risk this router should carry behind a warning,
+  so the integration is gone rather than deprecated. Removed the provider
+  definition, its seven curation routes, the launcher metadata and catalog
+  handling in curation and discovery, the user-model slug rule, and the setup
+  documentation. The direct Responses contract existed only to serve it and
+  goes with it: `src/direct-responses-provider.mjs`, the router's
+  `directResponses` dispatch and error passthrough, the failover and
+  vision-bridge exclusions, the registry validation, and the client publication
+  filter. No other provider declared `directResponses`, `codexOnly`, or
+  `explicitSelection`, so every route now takes the ordinary routed path.
+  **Anyone who curated `chatgpt-web/*` rows should stop using them and delete
+  them** with `bin/curate-models chatgpt-web --remove <slug>` before updating;
+  after the update those entries reference a provider that no longer exists and
+  are skipped at load with a `Skipped user model: ... references unknown
+  provider chatgpt-web` warning, so nothing breaks, but the stale rows stay in
+  `user-models.json` until removed.
+- **A new native model no longer stays invisible after a Codex upgrade.** The
+  account catalog endpoint gates its model list on `client_version`, but the
+  router replayed the ETag it had cached under the *previous* version. The
+  server answered `304`, and the router then restamped that pre-upgrade body
+  with the new version — so `cacheIsFresh` passed forever, the model
+  fingerprint never moved, drift never fired, and GPT-6-Astra never reached the
+  picker while the router was installed (issue #645). A `client_version` change
+  now sends an unconditional request, and a `304` answering an unconditional
+  request is treated as a failure rather than blessing the stale body.
+  Revalidation within one `client_version` is unchanged.
+- **An outdated `codex` on PATH can no longer strip a model out of Codex's own
+  cache.** The same endpoint gates its list on `client_version` — measured
+  live, `0.150.0` is not offered `gpt-6-astra` while `0.153.4` is. When the
+  Codex the router resolves is older than the client that last wrote
+  `models_cache.json`, the refresh now declines to write (`stale-client`)
+  instead of replacing the richer list with its own poorer one.
+- **A missing native capture now counts as catalog drift.** With
+  `native-models.json` absent, `nativeCatalogDriftDetected()` returned "nothing
+  to compare" and the startup reconciliation never republished, stranding the
+  picker on whatever was last written even as the account gained models. A
+  missing capture alongside a valid account cache is maximal drift, and
+  republishing re-captures from that cache.
+- **Native collaboration relay auth and quota failures preserve their semantics.**
+  When the native Codex relay needed to open a routed subagent payload receives
+  HTTP 429, the router now preserves that status instead of rewriting it to
+  502. The exact account-and-ciphertext refusal is remembered for a short,
+  bounded interval so immediate client retries fail locally without spending
+  another native relay request; other accounts and payloads remain isolated.
+  A native 401 is also preserved with a sanitized local error, allowing Codex's
+  own ChatGPT authentication recovery to refresh the session and retry without
+  exposing the upstream response body.
+
+- **Command Code forced tool choices now use the same bounded alias as the tool definition.**
+  The 64-character compatibility added in #643 shortened provider-facing tool names but
+  left an object 	ool_choice at the client's original spelling, so a forced long tool
+  could still be rejected as unknown. Forced choices for both Command Code variants now
+  pass through the same reversible namespace alias map as the advertised tools.
+
+- **Router-injected subagent interrupts now keep unique call IDs across turns.**
+  Streamed collaboration cleanup previously numbered injected `interrupt_agent`
+  calls from `call_router_interrupt_1` inside each request-scoped transform, so
+  a later turn could reuse an ID still present in Codex conversation history.
+  Stream and non-stream injection now share a UUID-backed call-ID generator,
+  preserving call/output pairing across long multi-turn agent sessions.
 - **OpenCode Go Muse Responses routes can continue after a completed web search.**
   Live replay probes for Muse Spark 1.2 and 1.3 Contributor confirmed that the
   Responses upstream accepts completed `web_search_call` history even though

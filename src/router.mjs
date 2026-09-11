@@ -64,6 +64,11 @@ import {
 } from "./zai-responses-compat.mjs";
 import { grokReasoningSummaryCompatTransform } from "./grok-reasoning-summary-compat.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
+import {
+  deepSeekCustomToolNames,
+  deepSeekResponsesInput,
+  usesDeepSeekResponses,
+} from "./deepseek-responses.mjs";
 import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
 import {
   MERGED_CATALOG_PATH,
@@ -94,10 +99,16 @@ import {
   unsupportedSearchContractError,
 } from "./search-capability.mjs";
 import {
+  markChatWireSearchHistory,
+  usesChatCompletionsWire,
+} from "./chat-wire-search-history.mjs";
+import {
   canonicalProviderId,
   readProviderSelection,
   selectedConfiguredListedModels,
 } from "./provider-selection.mjs";
+import { maxImageTokensForRoute } from "./prompt-image-usage.mjs";
+import { usesNativeChatReasoning } from "./chat-reasoning.mjs";
 import {
   estimateInputTokens,
   mergeTokenUsage,
@@ -198,12 +209,6 @@ import {
   loopbackProbeFetch,
 } from "./fetch-transport.mjs";
 import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
-import {
-  directResponsesBody,
-  directResponsesHeaders,
-  directResponsesTarget,
-  isDirectResponsesProvider,
-} from "./direct-responses-provider.mjs";
 
 installStableFetchTransport();
 
@@ -359,8 +364,20 @@ const AGENT_PAYLOAD_CACHE_TTL_MS =
     : 15 * 60 * 1_000;
 const AGENT_PAYLOAD_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const AGENT_PAYLOAD_CACHE_MAX_ENTRIES = 256;
+const configuredAgentRelayFailureBackoffMs = Number(
+  process.env.MODEL_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS ||
+    process.env.CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS ||
+    60_000,
+);
+const AGENT_RELAY_FAILURE_BACKOFF_MS =
+  Number.isFinite(configuredAgentRelayFailureBackoffMs) &&
+  configuredAgentRelayFailureBackoffMs > 0
+    ? Math.floor(configuredAgentRelayFailureBackoffMs)
+    : 60_000;
+const AGENT_RELAY_FAILURE_MAX_ENTRIES = 128;
 const agentPayloadCache = new Map();
 const agentPayloadCacheInFlight = new Map();
+const agentPayloadRelayFailures = new Map();
 let agentPayloadCacheBytes = 0;
 const agentPayloadCacheMetrics = {
   hits: 0,
@@ -822,6 +839,13 @@ function routedHeaders() {
     "Accept-Encoding": "identity",
     "User-Agent": `codex-router/${VERSION}`,
   };
+}
+
+// DeepSeek's current model already speaks Codex's wire protocol. The shared
+// API forwarder still owns credentials and upstream transport; bypass only
+// LiteLLM, whose unknown-model fallback simulates native Responses streaming.
+function routedResponsesTarget(route) {
+  return `${usesDeepSeekResponses(route) ? API_BASE : GATEWAY_BASE}/responses`;
 }
 
 // LiteLLM translates Codex Responses requests into Chat Completions only after
@@ -1543,6 +1567,40 @@ function agentPayloadCacheKey(encrypted, accountScope) {
     .digest("base64url");
 }
 
+function nativeAgentRelayRateLimitError() {
+  const error = new Error("Native collaboration payload relay is rate limited.");
+  error.status = 429;
+  error.code = "ERR_NATIVE_AGENT_RELAY_RATE_LIMITED";
+  return error;
+}
+
+function nativeAgentRelayUnauthorizedError() {
+  const error = new Error("Native collaboration payload relay requires refreshed authentication.");
+  error.status = 401;
+  error.code = "ERR_NATIVE_AGENT_RELAY_UNAUTHORIZED";
+  return error;
+}
+
+function purgeExpiredAgentRelayFailures(now = Date.now()) {
+  for (const [key, expiresAt] of agentPayloadRelayFailures) {
+    if (expiresAt <= now) agentPayloadRelayFailures.delete(key);
+  }
+}
+
+function agentRelayFailureActive(key, now = Date.now()) {
+  purgeExpiredAgentRelayFailures(now);
+  return agentPayloadRelayFailures.has(key);
+}
+
+function rememberAgentRelayFailure(key, now = Date.now()) {
+  purgeExpiredAgentRelayFailures(now);
+  agentPayloadRelayFailures.delete(key);
+  agentPayloadRelayFailures.set(key, now + AGENT_RELAY_FAILURE_BACKOFF_MS);
+  while (agentPayloadRelayFailures.size > AGENT_RELAY_FAILURE_MAX_ENTRIES) {
+    agentPayloadRelayFailures.delete(agentPayloadRelayFailures.keys().next().value);
+  }
+}
+
 function evictAgentPayload(key, { expired = false, evicted = false } = {}) {
   const entry = agentPayloadCache.get(key);
   if (!entry) return;
@@ -1597,7 +1655,10 @@ function rememberAgentPayload(key, plaintext) {
 }
 
 const agentPayloadCachePurgeTimer = setInterval(
-  () => purgeExpiredAgentPayloads(),
+  () => {
+    purgeExpiredAgentPayloads();
+    purgeExpiredAgentRelayFailures();
+  },
   Math.min(AGENT_PAYLOAD_CACHE_TTL_MS, 60_000),
 );
 agentPayloadCachePurgeTimer.unref?.();
@@ -1664,6 +1725,13 @@ async function relayEncryptedAgentPayloadOnce(
     signal,
   });
   if (!upstream.ok) {
+    if (upstream.status === 429) {
+      rememberAgentRelayFailure(cacheKey);
+      throw nativeAgentRelayRateLimitError();
+    }
+    if (upstream.status === 401) {
+      throw nativeAgentRelayUnauthorizedError();
+    }
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
     );
@@ -1737,6 +1805,7 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   const key = agentPayloadCacheKey(encrypted, accountScope);
   const cached = cachedAgentPayload(key);
   if (cached !== undefined) return cached;
+  if (agentRelayFailureActive(key)) throw nativeAgentRelayRateLimitError();
   const pending = agentPayloadCacheInFlight.get(key);
   if (pending) {
     agentPayloadCacheMetrics.coalesced += 1;
@@ -1947,14 +2016,11 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
   }
 }
 
-// DeepSeek thinking mode rejects a turn whose assistant message carries no
-// reasoning_content. LiteLLM's Responses->chat translation drops `reasoning`
-// input items entirely (`_transform_responses_api_input_item_to_chat_completion_message`
-// returns nothing for an item whose `content` is null, which is the shape
-// Codex stores), so the reasoning text never reaches the provider at all.
-// Carry each run of reasoning items onto the assistant turn it belongs to, and
-// the translation keeps it as that message's content. In-place, no-op when
-// there is nothing to carry.
+// Chat thinking providers need reasoning on the assistant turn it belongs to.
+// LiteLLM drops summary-only reasoning, but turns roleless plaintext content
+// into a user message. Carry each run onto its assistant and consume the
+// originals on Chat routes, so both input shapes replay exactly once. The
+// caller supplies a copied array; items are replaced, never mutated.
 //
 // Every assistant turn needs covering, not only the ones that call a tool.
 // This used to carry the reasoning solely into a following `function_call` or
@@ -1963,7 +2029,10 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
 // *next* request for a reasoning_content it had never been given. A subagent
 // always ends that way, which is why spawning one failed every time and an
 // ordinary tool loop did not (#256).
-function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
+function carryReasoningThroughInput(input, {
+  nativeThinking = false,
+  removeCarriedReasoning = false,
+} = {}) {
   if (!Array.isArray(input) || input.length < 2) return;
   for (let index = 0; index < input.length - 1; index += 1) {
     if (input[index]?.type !== "reasoning") continue;
@@ -1979,13 +2048,11 @@ function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
     }
     const text = texts.join("\n");
     const next = input[end];
-    // Only the last item of the run is rewritten. The earlier ones stay
-    // `reasoning` items, which the translation drops -- their text is already
-    // in the joined value, and leaving them in place keeps the array the same
-    // length for every other pass over it.
+    let removed = 0;
     if (text && next) {
       if (next.type === "function_call" || next.type === "custom_tool_call") {
         input[end - 1] = assistantTextItem(text, nativeThinking);
+        if (removeCarriedReasoning) removed = end - index - 1;
       } else if (next.type === "message" && next.role === "assistant") {
         // Merged into the assistant message rather than inserted in front of
         // it. A separate message would put two assistant turns back to back,
@@ -1994,9 +2061,14 @@ function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
         // LiteLLM folds a following function_call into the assistant message
         // it already emitted.
         input[end] = mergeAssistantText(next, text, nativeThinking);
+        if (removeCarriedReasoning) removed = end - index;
       }
     }
-    index = end - 1;
+    // Native Responses providers retain their existing item semantics. On
+    // Chat routes remove only a run successfully carried onto an assistant;
+    // unrelated or trailing reasoning must not be silently discarded.
+    if (removed) input.splice(index, removed);
+    index = end - removed - 1;
   }
 }
 
@@ -2445,10 +2517,9 @@ function compactionAttempts(route, aged, searchContract, { allowFailover = true 
   const settings = readFailoverSettings();
   if (!settings.enabled) return [route];
   const candidates = rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => (
-      !readHiddenModels().has(model.slug) &&
-      !isDirectResponsesProvider(providerForModel(model))
-    )),
+    selectedConfiguredListedModels().filter(
+      (model) => !readHiddenModels().has(model.slug),
+    ),
     {
       from: route,
       // The transcript being summarized is nearly all of the request, so its
@@ -2486,7 +2557,7 @@ async function summarizeWith(
     normalizeProviderAppToolOutputs(aged.input),
     route,
   );
-  const providerInput = needsConsoleGoResponsesToolCompatibility(route)
+  const providerInput = (needsConsoleGoResponsesToolCompatibility(route) || usesDeepSeekResponses(route))
     ? strictOpenCodeCompactionInput(compatibleInput, payload.tools, {
         maxNameLength: 64,
       })
@@ -2536,7 +2607,7 @@ async function summarizeWith(
   ) {
     return { searchCapabilityChanged: true };
   }
-  const upstream = await fetch(`${GATEWAY_BASE}/responses`, {
+  const upstream = await fetch(routedResponsesTarget(route), {
     method: "POST",
     headers: routedHeaders(),
     body: serialized,
@@ -2967,6 +3038,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   let flattenedNamespaces = new Map();
   const provider = providerForModel(route);
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
+  const deepSeekResponses = usesDeepSeekResponses(route);
   const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
   const compatibleInput = zenFreeCompatibleInput(
     normalizeProviderAppToolOutputs(agedInput),
@@ -3016,15 +3088,18 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // string, and spreading one of those produces an array of single characters
   // -- a turn that still reaches the provider, and still reads as a 200,
   // having quietly replaced the prompt with its own letters.
-  const input = Array.isArray(bridged) ? [...bridged] : bridged;
-  // Thinking chat providers need the assistant's reasoning replayed, but
-  // LiteLLM drops Responses `reasoning` input items. Generic providers keep
-  // the established visible-content carry used for DeepSeek. GLM's native
-  // preserved-thinking contract needs reasoning kept structurally separate so
-  // the API forwarder can restore it as `reasoning_content` before Z.ai.
-  carryReasoningThroughInput(input, {
-    nativeThinking: chatCompletionsProvider && route.requestProfile === "glm-thinking",
-  });
+  const input = deepSeekResponses
+    ? deepSeekResponsesInput(bridged)
+    : Array.isArray(bridged) ? [...bridged] : bridged;
+  // Legacy Chat routes retain their existing reasoning carry. The native
+  // DeepSeek route already has exactly one plaintext reasoning item and must
+  // not copy it into an assistant message for Chat translation.
+  if (!deepSeekResponses) {
+    carryReasoningThroughInput(input, {
+      nativeThinking: chatCompletionsProvider && usesNativeChatReasoning(route),
+      removeCarriedReasoning: chatCompletionsProvider,
+    });
+  }
   // Models marked requiresTrailingUserTurn reject requests ending with a model
   // turn. Pop trailing assistant messages, reasoning, or subagent outputs.
   if (requiresTrailingUserTurn(route)) {
@@ -3045,9 +3120,10 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // is how the client ships the collaboration runtime, the app toolset
   // (threads, automations, navigation), and every MCP server (node_repl,
   // peekaboo, github, ...). Chat-completions providers need every namespace
-  // flattened into ordinary functions; the response transform maps calls back
-  // to the client's native namespace shape.
-  if (chatCompletionsProvider) {
+  // flattened into ordinary functions; DeepSeek's native Responses endpoint
+  // requires the same tool subset. The response transform maps calls back to
+  // the client's native namespace shape.
+  if (chatCompletionsProvider || deepSeekResponses) {
     // Relay the app's full native toolset (threads, automations, app
     // navigation) to the provider. The client registers these tools with
     // deferLoading and executes the calls natively, but only sends a reduced
@@ -3116,13 +3192,13 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
-  if (needsStrictOpenCodeToolCompatibility(route)) {
+  if (needsStrictOpenCodeToolCompatibility(route) || deepSeekResponses) {
     const customTools = bridgeCustomTools(
       tools,
       routedInput,
       flattenedNamespaces,
       routedToolChoice,
-      undefined,
+      deepSeekResponses ? deepSeekCustomToolNames(tools, routedInput, routedToolChoice) : undefined,
       consoleGoResponsesCompatibility
         ? { maxNameLength: 64, bridgeAll: true }
         : undefined,
@@ -3131,7 +3207,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
   }
-  if (chatCompletionsProvider || consoleGoResponsesCompatibility) {
+  if (chatCompletionsProvider || consoleGoResponsesCompatibility || deepSeekResponses) {
     let searchHistory;
     try {
       searchHistory = flattenToolSearchHistory(
@@ -3171,19 +3247,37 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
       tools = repairToolSchemaRoots(tools, { nonRecursive: true });
     }
   }
-  // The stored call history must use the same tool names as the tool list, or
-  // the model copies the bare names out of its own transcript.
+  // Stored call history and forced choices must use the same tool names as the
+  // provider-facing list, or the model/request validator sees two identities.
   if (namespacesFlattened) {
     routedInput = flattenNamespacedHistory(routedInput, flattenedNamespaces);
-    if (provider?.id === "groq") {
+    if (
+      provider?.id === "groq" ||
+      provider?.id === "commandcode" ||
+      provider?.id === "commandcode-messages"
+    ) {
       routedToolChoice = flattenToolChoice(
         routedToolChoice,
         flattenedNamespaces,
       );
     }
   }
-  if (consoleGoResponsesCompatibility) {
+  if (consoleGoResponsesCompatibility || deepSeekResponses) {
     routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
+  }
+  // Last, so the marker text is built from the history every other rewrite has
+  // already settled. A chat-wire route would otherwise hand LiteLLM a
+  // `web_search_call` it silently discards, and the model answers this turn
+  // from a hole in the transcript instead of the search it was replayed.
+  if (usesChatCompletionsWire(provider)) {
+    const marked = markChatWireSearchHistory(routedInput);
+    if (marked.replaced > 0) {
+      routedInput = marked.input;
+      console.error(
+        `[codex-router] search-history model=${route.slug} wire=chat ` +
+        `web_search_call_items=${marked.replaced} action=replayed_as_text`,
+      );
+    }
   }
   const routed = {
     ...payload,
@@ -3211,7 +3305,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // reaches the provider. Set both: `reasoning.effort` is what actually
   // travels, and the flat field is what a bare chat-completions gateway reads.
   if (childEffort) {
-    routed.reasoning_effort = childEffort;
+    if (!deepSeekResponses) routed.reasoning_effort = childEffort;
     routed.reasoning = { ...(routed.reasoning || {}), effort: childEffort };
   }
   normalizeAutoToolChoice(routed, route);
@@ -3230,7 +3324,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   if (rejectsWebSearchOptions(route)) delete routed.web_search_options;
   return {
     body: Buffer.from(JSON.stringify(routed), "utf8"),
-    target: `${GATEWAY_BASE}/responses`,
+    target: routedResponsesTarget(route),
     headers: routedHeaders(),
     // The exact mode used while constructing this body. Failover compares it
     // with the immutable source contract as well as live state immediately
@@ -3283,10 +3377,7 @@ async function prepareRoutedRequest({
 function failoverCandidates({ route, agedInput, flattenedNamespaces, searchContract, chain }) {
   const hidden = readHiddenModels();
   return rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => (
-      !hidden.has(model.slug) &&
-      !isDirectResponsesProvider(providerForModel(model))
-    )),
+    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
     {
       from: route,
       // Context fit is checked after rebuilding the request for each
@@ -3318,10 +3409,7 @@ function subagentTransportFailoverCandidates({ request, route, agedInput, search
   if (subagentEligibility(route)) return [];
   const hidden = readHiddenModels();
   let ranked = rankSubagentCandidates(
-    selectedConfiguredListedModels().filter((model) => (
-      !hidden.has(model.slug) &&
-      !isDirectResponsesProvider(providerForModel(model))
-    )),
+    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
     {
       chain,
       requiredCapabilities: [
@@ -3520,7 +3608,6 @@ async function handleResponses(request, response, requestUrl) {
   let clientGone = false;
   let requestedModel = "";
   let route;
-  let directResponses = false;
   let upstreamRetries;
   let upstreamStatus;
   let upstreamLatencyMs;
@@ -3603,9 +3690,6 @@ async function handleResponses(request, response, requestUrl) {
       model: route?.slug || requestedModel || undefined,
       ...activityMetadataFromHeaders(request.headers),
     });
-    directResponses = route
-      ? isDirectResponsesProvider(providerForModel(route))
-      : false;
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
     // Codex remote compaction V2 uses the ordinary Responses endpoint with a
     // terminal trigger. Detect the protocol shape before route dispatch so the
@@ -3614,7 +3698,7 @@ async function handleResponses(request, response, requestUrl) {
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
 
-    if (route && !directResponses && (compactV1 || compactV2)) {
+    if (route && (compactV1 || compactV2)) {
       const compaction = await handleRoutedCompaction(
         request,
         response,
@@ -3683,12 +3767,7 @@ async function handleResponses(request, response, requestUrl) {
         ...activityMetadataFromHeaders(request.headers),
       });
     };
-    if (route && directResponses) {
-      const provider = providerForModel(route);
-      target = directResponsesTarget(provider, requestUrl.pathname, requestUrl.search);
-      headers = directResponsesHeaders(request.headers);
-      routedBody = directResponsesBody(payload, route);
-    } else if (route) {
+    if (route) {
       // Resolve the selected route's search contract once, before encrypted
       // handoff normalization or any other external work. A later failover may
       // not reintroduce ambient search that this route never advertised.
@@ -3848,7 +3927,7 @@ async function handleResponses(request, response, requestUrl) {
     // live capability contract as every fallback. This catches unsupported
     // search history and sidecar changes after normalization before any
     // provider-bound bytes leave the router.
-    if (route && !directResponses) {
+    if (route) {
       assertRoutedSearchContract(route, builtSearchMode, searchContract);
     }
     let { response: upstream, retries } = await fetchWithRetry(
@@ -3880,7 +3959,7 @@ async function handleResponses(request, response, requestUrl) {
     // and the error translation below both need it, and it can only be read
     // once. Nothing is relayed either way, so reading it is free.
     let failedBodyText;
-    if (route && !directResponses && !upstream.ok) {
+    if (route && !upstream.ok) {
       failedBodyText = await boundedResponseText(
         upstream,
         MAX_BUFFERED_RESPONSE_BYTES,
@@ -3972,25 +4051,7 @@ async function handleResponses(request, response, requestUrl) {
     // recorded earlier: a quota that refilled early, a limit the operator
     // raised, or a reset time the provider got wrong all end the same way, and
     // a real answer is better evidence than anything on disk.
-    if (route && !directResponses && upstream.ok) clearProviderCooldown(route.provider);
-    // The direct bridge owns its own explicit failure vocabulary. It has not
-    // passed through LiteLLM, so translating the body as a gateway exception
-    // would erase the actionable browser/login/UI-drift error it produced.
-    if (route && directResponses && !upstream.ok) {
-      await pipeResponse(upstream, response, HOP_BY_HOP_HEADERS);
-      recordUsageEvent({
-        model: route.slug,
-        provider: canonicalProviderId(route.provider),
-        status: upstream.status,
-        durationMs: Date.now() - startedAt,
-        responseStartMs: upstreamLatencyMs,
-      });
-      observeSubagentOutcome(request, route, upstream.status);
-      finalStatus = upstream.status;
-      activityStatus = upstream.status;
-      usageRecorded = true;
-      return;
-    }
+    if (route && upstream.ok) clearProviderCooldown(route.provider);
     // Gateway error bodies leak LiteLLM's internal exception chain, which
     // reads like a router bug. Rewrite them to name the provider that failed.
     // Native traffic passes through untouched: OpenAI errors are already clear.
@@ -4055,12 +4116,15 @@ async function handleResponses(request, response, requestUrl) {
     const createResponsePipeline = (contentType) => {
       const usageObserver = new ResponseUsageTransform(contentType, {
         estimatedInputTokens:
-          ZERO_INPUT_ESTIMATE && route && !directResponses
-            ? estimateInputTokens(routedBody, { contextWindow: route.contextWindow })
+          ZERO_INPUT_ESTIMATE && route
+            ? estimateInputTokens(routedBody, {
+                contextWindow: route.contextWindow,
+                maxTokensPerImage: maxImageTokensForRoute(route),
+              })
             : undefined,
       });
       const transforms = [usageObserver];
-      let envelopeCompat = !directResponses && route
+      let envelopeCompat = route
         ? zaiResponsesCompatTransform(route.provider, contentType)
         : undefined;
       // Z.ai Responses streams from GLM-5.3 can start assistant text after
@@ -4073,14 +4137,14 @@ async function handleResponses(request, response, requestUrl) {
         envelopeCompat = new ZaiResponsesCompatTransform();
       }
       if (envelopeCompat) transforms.push(envelopeCompat);
-      const grokReasoningSummaryCompat = !directResponses && route
+      const grokReasoningSummaryCompat = route
         ? grokReasoningSummaryCompatTransform(providerForModel(route), contentType)
         : undefined;
       if (grokReasoningSummaryCompat) transforms.push(grokReasoningSummaryCompat);
       // LiteLLM can add blank assistant envelopes while translating either
       // Chat Completions or Messages. The factory refuses native traffic and
       // providers that already speak Responses, so those paths gain no stage.
-      const translatedToolMessageCompat = !directResponses && route
+      const translatedToolMessageCompat = route
         ? translatedToolMessageCompatTransform(providerForModel(route), contentType)
         : undefined;
       if (translatedToolMessageCompat) transforms.push(translatedToolMessageCompat);
@@ -4102,7 +4166,7 @@ async function handleResponses(request, response, requestUrl) {
         );
       }
       const guard =
-        route && !directResponses && EMPTY_COMPLETION_RETRY
+        route && EMPTY_COMPLETION_RETRY
           ? new EmptyCompletionGuard(contentType, {
               maxPreludeBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
               maxPreludeMs: EMPTY_COMPLETION_PRELUDE_MS,
@@ -4239,7 +4303,7 @@ async function handleResponses(request, response, requestUrl) {
       // discarded attempt's staged headers are no longer authoritative even
       // when this check fails and the router writes its own local response.
       clearStagedResponseHead(response);
-      if (route && !directResponses) {
+      if (route) {
         assertRoutedSearchContract(route, builtSearchMode, searchContract);
       }
       emptyCompletionRetried = true;

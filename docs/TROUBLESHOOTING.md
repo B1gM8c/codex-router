@@ -35,6 +35,31 @@ Expected flow:
 
 No uninstall needed. The router stays installed while merging ALL natives + routed models.
 
+### A new native still does not appear
+
+The account model endpoint gates its list on the Codex **client version**: an
+older client is simply not offered a newly released model. The router asks with
+the version of the Codex CLI it resolves, so a stale `codex` earlier on `PATH`
+than the Codex you actually run will fetch the shorter list.
+
+The router refuses to overwrite Codex's cache with that shorter list and logs:
+
+```
+[codex-router] The resolved Codex CLI is older than the client that wrote the account model cache
+```
+
+Fix it by updating that Codex, or by pointing the router at the right one:
+
+```sh
+CODEX_BIN=/path/to/the/codex/you/run ./bin/refresh-catalog
+```
+
+Check which binary and version the router resolves:
+
+```sh
+./bin/model-router codex doctor
+```
+
 ## State directory belongs to another checkout
 
 If `doctor` reports a state ownership failure, you are running from a clone

@@ -2,6 +2,7 @@ import { Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
+import { promptImageUsage } from "./prompt-image-usage.mjs";
 
 const MAX_JSON_CAPTURE_BYTES = 8 * 1024 * 1024;
 
@@ -25,8 +26,8 @@ const MAX_JSON_CAPTURE_BYTES = 8 * 1024 * 1024;
 // compaction fires somewhere between 690,000 and 900,000 real tokens.
 //
 // That band only holds if the bytes handed to it are bytes the model reads.
-// See NON_VISIBLE_KEY below for the one class that is not, and issue #266 for
-// what happened when it was counted anyway.
+// See NON_VISIBLE_KEY below and the provider-scoped image bound, and issue #266
+// for what happened when non-text bytes were counted anyway.
 const ESTIMATE_BYTES_PER_TOKEN = 3.3;
 
 // Below this the substitution could not affect compaction anyway, and leaving
@@ -58,12 +59,10 @@ const MIN_ESTIMATED_INPUT_TOKENS = 1_000;
 // the router sends. That is the regime issue #266 was reported from, and 64%
 // of the bytes charged at 3.3 each is where 3.9x-4.7x comes from.
 //
-// Everything else stays counted. JSON escaping (0.2%-3%) and structural
+// Other text stays counted. JSON escaping (0.2%-3%) and structural
 // scaffolding (1%-5%) are small and keep the estimate erring high, which is the
-// direction that matters. Base64 image data is far larger than the tokens an
-// image really costs, but what it really costs is a per-provider tiling formula
-// the router has no business inventing, so it too stays counted at the byte
-// rate -- wrong, but wrong upward.
+// direction that matters. Images use a separate token bound only when the
+// provider documents one; otherwise their bytes remain counted at this rate.
 //
 // Subtracting what is provably invisible rather than summing what is visible is
 // the point. An unrecognized field is counted by default, so a body shape
@@ -234,14 +233,16 @@ export function tokenUsageFromPayload(payload) {
 // Returns undefined when the request is too small for the estimate to matter,
 // which is also what keeps it away from genuinely small turns.
 //
-// The bytes counted are the body minus its `encrypted_content` ciphertext.
+// The bytes counted are the body minus its `encrypted_content` ciphertext and,
+// when configured, actual image references plus a documented per-image bound.
 // Anything that is not JSON -- a compressed frame, an opaque buffer, a plain
 // string -- simply finds no key to discount and is counted whole, exactly as
 // before.
-export function estimateInputTokens(body, { contextWindow } = {}) {
+export function estimateInputTokens(body, { contextWindow, maxTokensPerImage } = {}) {
   const buffer = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""), "utf8");
-  const bytes = buffer.byteLength - nonVisibleBytes(buffer);
-  const estimate = Math.ceil(bytes / ESTIMATE_BYTES_PER_TOKEN);
+  const images = promptImageUsage(buffer, maxTokensPerImage);
+  const bytes = buffer.byteLength - nonVisibleBytes(buffer) - images.bytes;
+  const estimate = Math.ceil(bytes / ESTIMATE_BYTES_PER_TOKEN) + images.tokens;
   if (estimate < MIN_ESTIMATED_INPUT_TOKENS) return undefined;
   // A request the provider answered cannot have exceeded the window, so the
   // estimate is never allowed to claim it did.
@@ -254,15 +255,15 @@ export function estimateInputTokens(body, { contextWindow } = {}) {
   // every one of those turns compacted for nothing. That was the bug: not the
   // clamp, but what was allowed to reach it.
   //
-  // Counting only model-visible bytes puts a floor under it. For the estimate
-  // to exceed the window the visible text must exceed `contextWindow * 3.3`
+  // For text-only requests, counting only model-visible bytes puts a floor
+  // under it. To exceed the window the visible text must exceed `contextWindow * 3.3`
   // bytes, and real text tokenizes between 3.3 (code) and 4.0 (prose) bytes per
   // token -- so a clamped estimate means the true count is between 82.5% and
   // 100% of the window. `autoCompact` sits at 85%. Compacting there is correct:
   // the conversation really is against the limit, and the alternative, reporting
   // something below the threshold, would skip the compaction and hand the next
   // turn to the provider to reject. Erring high costs a summary; erring low
-  // costs the turn.
+  // costs the turn. Vision requests add the provider's per-image upper bound.
   return Number.isInteger(contextWindow) && contextWindow > 0
     ? Math.min(estimate, contextWindow)
     : estimate;

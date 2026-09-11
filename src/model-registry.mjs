@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { usesDeepSeekResponses } from "./deepseek-responses.mjs";
 
 import {
   genericProviderRuntimeDescriptor,
@@ -253,10 +254,8 @@ function loadRegistry() {
       if (provider.keyless !== undefined && typeof provider.keyless !== "boolean") {
         fail(`provider ${provider.id} has an invalid keyless flag`);
       }
-      for (const field of ["directResponses", "codexOnly", "explicitSelection"]) {
-        if (provider[field] !== undefined && typeof provider[field] !== "boolean") {
-          fail(`provider ${provider.id} has an invalid ${field} flag`);
-        }
+      if (provider.explicitSelection !== undefined && typeof provider.explicitSelection !== "boolean") {
+        fail(`provider ${provider.id} has an invalid explicitSelection flag`);
       }
       if (provider.keyless && provider.credential !== undefined) {
         fail(`keyless provider ${provider.id} must not declare a credential`);
@@ -351,21 +350,6 @@ function loadRegistry() {
       }
       if (provider.transport === "ollama" && !provider.keyless) {
         fail(`provider ${provider.id} Ollama transport must be keyless`);
-      }
-      // A direct Responses provider bypasses LiteLLM so a Codex-native request
-      // envelope reaches a reviewed local bridge intact. Keep that exception
-      // narrower than the ordinary keyless-provider contract: no remote host,
-      // no protocol translation, and no publication to non-Codex clients.
-      if (
-        provider.directResponses &&
-        (!provider.keyless || provider.protocol !== "openai-responses" || !provider.codexOnly)
-      ) {
-        fail(
-          `direct Responses provider ${provider.id} must be keyless, openai-responses, and Codex-only`,
-        );
-      }
-      if (provider.codexOnly && !provider.directResponses) {
-        fail(`Codex-only provider ${provider.id} must use the direct Responses contract`);
       }
     }
     providers.set(provider.id, Object.freeze(provider));
@@ -1035,5 +1019,10 @@ export const MODEL_BY_GATEWAY_ID = new Map(
 );
 
 export function providerForModel(model) {
-  return RUNTIME_PROVIDERS.get(model.provider);
+  const provider = RUNTIME_PROVIDERS.get(model.provider);
+  // One credential/provider identity can serve both its legacy Chat aliases
+  // and the current direct Flash model's native Responses contract.
+  return usesDeepSeekResponses(model) && provider
+    ? { ...provider, protocol: "openai-responses" }
+    : provider;
 }
