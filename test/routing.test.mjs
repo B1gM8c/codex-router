@@ -10056,7 +10056,8 @@ test("router compacts translated OpenCode routes and pins subagents on both rout
     );
     assert.deepEqual(
       nativeEvents.find((event) => event.type === "response.completed").response.output,
-      [terminalBlank, restoredTool("opencode-go-responses/gpt-5.6-luna")],
+      // The kept blank message precedes a tool call, so it is labelled commentary.
+      [{ ...terminalBlank, phase: "commentary" }, restoredTool("opencode-go-responses/gpt-5.6-luna")],
     );
   } finally {
     await stopChild(router);
@@ -10357,7 +10358,8 @@ test("router enables the terminal-only bridge repair only for Messages routes", 
     );
     assert.deepEqual(
       openai.events.find((event) => event.type === "response.completed").response.output,
-      [blank, tool],
+      // The kept blank message precedes a tool call, so it is labelled commentary.
+      [{ ...blank, phase: "commentary" }, tool],
     );
   } finally {
     await stopChild(router);
