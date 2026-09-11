@@ -56,6 +56,7 @@ Supersedes and extends `deepseek-v4-1-flash-2026-09-11.md` with additional famil
 
 ### GLM 5.3 Flash
 - **OpenRouter**: `z-ai/glm-5.3-flash` ✅ LIVE (1,310,720 context advertised)
+- **Nous Research**: `z-ai/glm-5.3-flash` ✅ ADDED (1,310,720 context advertised, 1,048,576 served) — **WAS MISSING**
 - **OpenCode**: `glm-5.3-flash` ✅ LIVE (1M context, 131K output)
 - **Z.ai API**: ✅ CURATED
 - **Z.ai Coding**: ✅ CURATED
@@ -63,7 +64,7 @@ Supersedes and extends `deepseek-v4-1-flash-2026-09-11.md` with additional famil
 - **Ollama Cloud**: ✅ CURATED
 - **OpenCode Go**: ✅ CURATED (as replacement for ox-alpha)
 
-**Status**: All GLM 5.3 Flash routes are correctly pinned.
+**Status**: Nous Research route was missing despite live catalog listing. Now added with standard Nous 1M context (943K autoCompact).
 
 ## Detailed Findings by Provider
 
@@ -113,9 +114,9 @@ Public catalog query returned 30+ relevant models:
 
 **GLM:**
 - `z-ai/glm-5.3` — 1,310,720 context ✅
-- `z-ai/glm-5.3-flash` — 1,310,720 context ✅
+- `z-ai/glm-5.3-flash` — 1,310,720 context ✅ **NOW CURATED**
 
-**Repository Status:** All Nous Research routes are correctly curated.
+**Repository Status:** All Nous Research routes are correctly curated. GLM-5.3-Flash pin was missing but is now added.
 
 ### OpenCode (models.dev)
 
@@ -205,10 +206,24 @@ Config inspection + research note:
 OpenRouter has served `deepseek/deepseek-v4.1-flash` since 2026-09-10 but the repo
 had no pin. Route follows standard OpenRouter patterns:
 - 1,048,576 context window
-- auto-compact at 943,000 (standard OpenRouter ratio)
+- auto-compact at 920,000 (leaves 128K+ for max effort output per DeepSeek spec)
 - Image input support
 - low/high/max reasoning ladder
 - Priority 8 (matching DeepSeek API route)
+
+### 3. Add Nous Research Route for GLM-5.3-Flash
+
+**File to create:**
+- `/workspace/config/nousresearch/glm-5.3-flash.json` ✅ ADDED
+
+Nous Research lists `z-ai/glm-5.3-flash` live but the repo had no pin despite having
+the non-Flash GLM-5.3 route. Route follows standard Nous patterns:
+- 1,048,576 context window (Nous serves 1M, advertises 1.31M)
+- auto-compact at 943,000 (standard Nous ratio)
+- Text-only (no image support)
+- low/high/max reasoning ladder
+- ox-alpha request profile (clamps effort)
+- Priority 103
 
 ### 2. Update Tests
 
