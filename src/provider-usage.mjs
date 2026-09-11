@@ -231,12 +231,14 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
     // 426-token one at 69 on the same model.
     const firstTokenMs = optionalNonnegative(event.firstTokenMs);
     const generationDurationMs = durationMs - (firstTokenMs ?? durationMs);
-    // Industry TTFT measures time to first *visible* token. Reasoning tokens
-    // are generated during silent thinking before any visible output. When the
-    // provider reports the split, subtract reasoning from output to get the
-    // tok/s numerator. Provider totals still count full output for billing.
-    const reasoningTokens = optionalNonnegative(event.reasoningTokens) ?? 0;
-    const speedOutputTokens = Math.max(0, selectedOutputTokens - reasoningTokens);
+    // The numerator must count exactly the tokens generated inside that
+    // window. Reasoning tokens are generated inside it when the provider
+    // streamed reasoning deltas (the clock started on the first of them), and
+    // before it when the provider thought in silence until the first visible
+    // token. Only the second case subtracts them; without the marker (rows
+    // written before it existed) the inclusive count is the closer answer on
+    // every route seen so far. Provider totals still count full output.
+    const speedOutputTokens = tokensGeneratedAfterFirstToken(event, selectedOutputTokens);
     // A long Codex turn can trip the empty-completion hold budget and still
     // finish as a normal 200 with streamed tokens. That flag means "we
     // stopped waiting to classify emptiness", not "this rate is unusable".
@@ -331,6 +333,19 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
         ),
     })),
   };
+}
+
+// Some providers report output tokens that already exclude reasoning (a
+// reasoning count larger than the output count proves it), so the inclusive
+// total is rebuilt before deciding whether to subtract.
+export function tokensGeneratedAfterFirstToken(event, outputTokens) {
+  const reasoningTokens = optionalNonnegative(event.reasoningTokens) ?? 0;
+  const inclusiveOutputTokens =
+    reasoningTokens > outputTokens ? outputTokens + reasoningTokens : outputTokens;
+  if (event.reasoningStreamed === false) {
+    return Math.max(0, inclusiveOutputTokens - reasoningTokens);
+  }
+  return inclusiveOutputTokens;
 }
 
 export async function providerUsageSnapshot(options = {}) {

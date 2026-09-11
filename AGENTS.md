@@ -1946,12 +1946,15 @@ retry rules on the shared path.
   Restore exact namespace/name identities, including plain-name collisions.
 - Codex can flatten native and MCP function/custom declarations before sending
   them to a routed provider. Restore namespaces only for live, directly exposed
-  tools identified by the request's canonical turn metadata, and only on routes
-  that flatten tools. Responses-native routes that skip flattening retain the
-  client's declaration shape. Restore before app expansion and normal flattening
-  so client schemas, custom formats and collaboration model constraints use the
-  existing adapters. Never infer tools from name prefixes or create declarations
-  from metadata alone; ambiguous and ordinary-name collisions remain unchanged.
+  tools identified by the request's canonical turn metadata. Rewrite declarations
+  only on routes that flatten tools. Responses-native routes that skip
+  flattening send the client's declarations unchanged, but build their response
+  lookup from the restored inventory so a returned flat call still reaches Codex
+  under its `{namespace, name}` identity. Restore before app expansion and
+  normal flattening so client schemas, custom formats and collaboration model
+  constraints use the existing adapters. Never infer tools from name prefixes or
+  create declarations from metadata alone; ambiguous and ordinary-name
+  collisions remain unchanged.
 - GLM thinking, legacy DeepSeek thinking and Command Code's DeepSeek Flash Chat
   route carry reasoning through LiteLLM as assistant `thinking` parts, restored
   by the forwarder to `reasoning_content`. Remove only successfully carried
@@ -2020,10 +2023,13 @@ xAI and Codex has its own idle limit. The router's post-prologue stall guard
 (`CODEX_ROUTER_GROK_STREAM_STALL_MS`, ten minutes) is the one meant to decide.
 
 1. **Every transport hop outlasts the guard.** `src/grok-stream-timeouts.mjs`
-   sizes the router's Grok gateway pool, the gateway's per-deployment
-   `stream_timeout`, and the forwarder's xAI pool from that one value. A new hop
-   on the Grok path takes its bound from there. The shared Undici pool keeps its
-   default for every other provider.
+   sizes the router's Grok gateway pool (its headers and body bounds), the
+   gateway's per-deployment `stream_timeout` and non-streaming `timeout`, and
+   the forwarder's xAI pool from that one value. Compaction is a hop too: it is
+   not streamed, so its headers arrive only after the whole generation, and it
+   uses the same pool and deployment bound as a turn. A new hop on the Grok path
+   takes its bound from there. The shared Undici pool keeps its default for
+   every other provider.
 2. **Codex's idle timer is fed a lifecycle event, never a comment.** Codex
    abandons a stream after five minutes without a parsed data event and sends
    the whole turn again, which bills the provider twice; an SSE comment or a

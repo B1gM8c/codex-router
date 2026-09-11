@@ -1575,11 +1575,16 @@ function tokensPerSecondFromEvent(event: UsageEvent): number | null {
   ) return null;
   const generationDurationMs = durationMs - firstTokenMs;
   if (generationDurationMs <= 0) return null;
-  // Subtract reasoning tokens from output for tok/s numerator (same as provider-usage).
-  // Industry TTFT measures time to first visible token; reasoning tokens are generated
-  // during silent thinking before any visible output.
-  const reasoningTokens = optionalNumber(event.reasoningTokens) ?? 0;
-  const speedOutput = Math.max(0, output - reasoningTokens);
+  // Same rule as provider-usage.mjs: count the tokens generated inside the
+  // timed window. Reasoning that was streamed started the clock, so it stays
+  // in; reasoning that ran silently before the first visible token belongs to
+  // TTFT and is subtracted. A reasoning count above the output count means the
+  // provider reports visible tokens only, so the inclusive total is rebuilt.
+  const reasoningTokens = Math.max(0, optionalNumber(event.reasoningTokens) ?? 0);
+  const inclusiveOutput = reasoningTokens > output ? output + reasoningTokens : output;
+  const speedOutput = event.reasoningStreamed === false
+    ? Math.max(0, inclusiveOutput - reasoningTokens)
+    : inclusiveOutput;
   const rate = (speedOutput * 1_000) / generationDurationMs;
   return Number.isFinite(rate) && rate <= 500 ? Math.round(rate * 10) / 10 : null;
 }

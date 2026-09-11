@@ -820,6 +820,103 @@ test("a routed Grok terminal SSE error is recorded as a failed turn", async () =
   }
 });
 
+test("a Grok terminal SSE error stays a failed turn when the client leaves the still-open stream", { timeout: 30_000 }, async () => {
+  let gatewayRequests = 0;
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    gatewayRequests += 1;
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.write(
+      'event: response.reasoning_summary_text.delta\n' +
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"Checking the tool result."}\n\n',
+    );
+    if (gatewayRequests === 1) {
+      response.write(
+        'event: error\n' +
+          'data: {"type":"error","code":"local_router_stream_failed","message":"Grok stopped after a tool result and its repair request failed upstream.","param":null}\n\n',
+      );
+    }
+    // A gateway can keep the stream open after its terminal; the WebSocket
+    // edge then aborts it. Hold it until the router lets go.
+    await new Promise((resolve) => {
+      request.once("close", resolve);
+      response.once("close", resolve);
+    });
+  });
+  const routerPort = await openPort();
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-router-grok-open-error-"));
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const request = (signal) =>
+    fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "grok-oauth/grok-4.6",
+        input: "continue after the tool result",
+        stream: true,
+      }),
+      signal,
+    });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+
+    // The terminal error reaches the client, which then leaves the open stream.
+    const leaver = new AbortController();
+    const failed = await request(leaver.signal);
+    assert.equal(failed.status, 200);
+    const reader = failed.body.getReader();
+    const decoder = new TextDecoder();
+    let body = "";
+    while (!body.includes("local_router_stream_failed")) {
+      const { value, done } = await reader.read();
+      assert.equal(done, false, `the stream ended before its terminal error: ${body}`);
+      body += decoder.decode(value, { stream: true });
+    }
+    leaver.abort();
+    const [failure] = await waitForUsageEvents(stateDir, 1, router);
+    assert.equal(failure.model, "grok-oauth/grok-4.6");
+    assert.equal(failure.status, 502);
+
+    // Negative control: leaving an open Grok stream that reported no failure
+    // is still a cancellation, not a provider failure. Leave only once the
+    // stream is flowing, the same point the failed turn above was left at;
+    // reasoning is liveness, so it reaches the client without a terminal.
+    const within = (promise, label) => {
+      let timer;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} did not arrive`)), 10_000);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    };
+    const canceler = new AbortController();
+    const flowing = await within(request(canceler.signal), "the open stream's head");
+    assert.equal(flowing.status, 200);
+    const firstChunk = await within(flowing.body.getReader().read(), "the open stream's reasoning");
+    assert.equal(firstChunk.done, false);
+    canceler.abort();
+    const events = await waitForUsageEvents(stateDir, 2, router);
+    assert.equal(events[1].model, "grok-oauth/grok-4.6", JSON.stringify(events));
+    assert.equal(events[1].status, 0, JSON.stringify(events));
+    assert.equal(gatewayRequests, 2);
+  } finally {
+    await stopChild(router);
+    gateway.server.closeAllConnections?.();
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("router dispatches aliased native slugs to the mapped external model", async () => {
   const gatewayRequests = [];
   const gateway = await mockServer(async (request, response) => {

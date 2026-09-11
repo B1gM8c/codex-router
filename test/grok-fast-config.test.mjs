@@ -126,3 +126,18 @@ test("rendered catalog keeps Fast opt-in on grok-oauth/grok-4.6 and leaves Grok 
   assert.deepEqual(grok45.service_tiers, []);
   assert.equal(grok45.default_service_tier, null);
 });
+
+// Compaction reaches the Grok deployment without streaming, where LiteLLM
+// applies `timeout` rather than `stream_timeout`. Both must outlast the router's
+// stall guard, and no other deployment may pick up either bound.
+test("Grok deployments bound non-streaming calls like streams and other deployments keep the global timeout", () => {
+  const blocks = renderLiteLlmConfig().split("\n  - model_name: ").slice(1);
+  const grok = blocks.find((block) => block.startsWith('"grok-oauth-grok-4-6"'));
+  assert.ok(grok, "the grok-oauth/grok-4.6 deployment is rendered");
+  assert.match(grok, /\n {6}stream_timeout: 660\n/);
+  assert.match(grok, /\n {6}timeout: 660\n/);
+
+  const others = blocks.filter((block) => !block.includes("stream_timeout"));
+  assert.ok(others.length > 0, "a non-Grok deployment is rendered");
+  for (const block of others) assert.doesNotMatch(block, /\n {6}timeout: /);
+});
