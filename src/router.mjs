@@ -3732,6 +3732,7 @@ async function handleResponses(request, response, requestUrl) {
   let upstreamStatus;
   let upstreamLatencyMs;
   let firstTokenMs;
+  let reasoningStreamed;
   let usageTransform;
   let emptyCompletionGuard;
   let retryUsageTransform;
@@ -4228,6 +4229,7 @@ async function handleResponses(request, response, requestUrl) {
         durationMs: Date.now() - startedAt,
         responseStartMs: upstreamLatencyMs,
         firstTokenMs,
+        reasoningStreamed,
       }, diagnostics);
       observeSubagentOutcome(request, route, upstream.status);
       finalStatus = translatedStatus;
@@ -4395,6 +4397,7 @@ async function handleResponses(request, response, requestUrl) {
     // silent thinking that would otherwise be charged to the generation rate.
     const firstTokenAt = usageTransform?.firstTokenAt?.();
     if (firstTokenAt !== undefined) firstTokenMs = firstTokenAt - startedAt;
+    reasoningStreamed = usageTransform?.reasoningStreamed?.();
     estimatedInputTokens = usageTransform?.substitutedInputTokens();
     // The `close` listener above sets `clientGone` when the client's socket
     // goes away, but `pipeResponse` can resolve before that event fires: the
@@ -4643,6 +4646,7 @@ async function handleResponses(request, response, requestUrl) {
       durationMs: Date.now() - startedAt,
       responseStartMs: upstreamLatencyMs,
       firstTokenMs,
+      reasoningStreamed,
       ...usage,
       estimatedInputTokens,
       ...toolResultAging,
@@ -4786,6 +4790,7 @@ async function handleResponses(request, response, requestUrl) {
       );
       const firstTokenAt = usageTransform.firstTokenAt?.();
       if (firstTokenAt !== undefined) firstTokenMs = firstTokenAt - startedAt;
+      reasoningStreamed = usageTransform.reasoningStreamed?.();
     }
     // Codex may close a native stream immediately after response.completed.
     // That is a successful terminal turn, not a canceled generation.
@@ -4800,6 +4805,7 @@ async function handleResponses(request, response, requestUrl) {
           durationMs: Date.now() - startedAt,
           responseStartMs: upstreamLatencyMs,
           firstTokenMs,
+          reasoningStreamed,
           ...usage,
           estimatedInputTokens,
           ...toolResultAging,
@@ -4833,6 +4839,7 @@ async function handleResponses(request, response, requestUrl) {
           durationMs: Date.now() - startedAt,
           responseStartMs: upstreamLatencyMs,
         firstTokenMs,
+        reasoningStreamed,
           retries: upstreamRetries,
           ...usage,
           estimatedInputTokens,
@@ -4858,6 +4865,7 @@ async function handleResponses(request, response, requestUrl) {
         durationMs: Date.now() - startedAt,
         responseStartMs: upstreamLatencyMs,
         firstTokenMs,
+        reasoningStreamed,
         retries: upstreamRetries,
         ...usage,
         estimatedInputTokens,

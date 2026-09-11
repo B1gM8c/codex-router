@@ -80,6 +80,10 @@ export function recordUsageEvent({
   // reports it: tokens after the first token, with the wait before it counted
   // separately as time-to-first-token.
   firstTokenMs,
+  // Whether reasoning deltas were relayed in the stream. Measured booleans
+  // only: absent means the row predates the field and the aggregator falls
+  // back to the inclusive token count.
+  reasoningStreamed,
   inputTokens,
   billedInputTokens,
   cachedInputTokens,
@@ -197,6 +201,7 @@ export function recordUsageEvent({
     ...(safeTokenCount(firstTokenMs) !== undefined
       ? { firstTokenMs: safeTokenCount(firstTokenMs) }
       : {}),
+    ...(typeof reasoningStreamed === "boolean" ? { reasoningStreamed } : {}),
     ...(streamAborted === true ? { streamAborted: true } : {}),
     ...(emptyCompletion === true ? { emptyCompletion: true } : {}),
     ...(emptyCompletionRetried === true ? { emptyCompletionRetried: true } : {}),
@@ -518,6 +523,9 @@ export function recentUsageEvents({
             : {}),
           ...(safeTokenCount(event.firstTokenMs) !== undefined
             ? { firstTokenMs: safeTokenCount(event.firstTokenMs) }
+            : {}),
+          ...(typeof event.reasoningStreamed === "boolean"
+            ? { reasoningStreamed: event.reasoningStreamed }
             : {}),
           ...(event.streamAborted === true ? { streamAborted: true } : {}),
           ...(event.emptyCompletion === true ? { emptyCompletion: true } : {}),

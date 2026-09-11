@@ -1015,3 +1015,60 @@ test("Grok tier-only terminal metadata preserves earlier measured token counters
   assert.equal(transform.tokenUsage().totalTokens, 18);
   assert.equal(transform.tokenUsage().serviceTier, "priority");
 });
+
+test("reasoning deltas start the first-token clock and mark reasoning as streamed", async () => {
+  // Responses API: the summary delta arrives while the model is still
+  // thinking, so the window opened here contains the reasoning tokens.
+  const responses = new ResponseUsageTransform("text/event-stream");
+  await passThrough(responses, [
+    'event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta","delta":"Thinking"}\n\n',
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+    "data: [DONE]\n\n",
+  ]);
+  assert.equal(typeof responses.firstTokenAt(), "number");
+  assert.equal(responses.reasoningStreamed(), true);
+
+  // Chat bridges relay reasoning as delta.reasoning_content, often with no
+  // type field on the chunk at all.
+  const chat = new ResponseUsageTransform("text/event-stream");
+  await passThrough(chat, [
+    'data: {"choices":[{"delta":{"reasoning_content":"Let me"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+    "data: [DONE]\n\n",
+  ]);
+  assert.equal(typeof chat.firstTokenAt(), "number");
+  assert.equal(chat.reasoningStreamed(), true);
+
+  // Reasoning relayed after the first visible token still counts: its
+  // generation time sits inside the window either way.
+  const interleaved = new ResponseUsageTransform("text/event-stream");
+  await passThrough(interleaved, [
+    'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+    'data: {"choices":[{"delta":{"reasoning":"then again"}}]}\n\n',
+    "data: [DONE]\n\n",
+  ]);
+  assert.equal(interleaved.reasoningStreamed(), true);
+});
+
+test("a stream with only visible output reports reasoning as not streamed", async () => {
+  const transform = new ResponseUsageTransform("text/event-stream");
+  await passThrough(transform, [
+    'data: {"choices":[{"delta":{"reasoning_content":""}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}\n\n',
+    "data: [DONE]\n\n",
+  ]);
+  assert.equal(typeof transform.firstTokenAt(), "number");
+  assert.equal(transform.reasoningStreamed(), false);
+});
+
+test("a chat tool-call delta counts as the first token", async () => {
+  const transform = new ResponseUsageTransform("text/event-stream");
+  await passThrough(transform, [
+    'data: {"choices":[{"delta":{"role":"assistant","content":null}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"shell","arguments":""}}]}}]}\n\n',
+    "data: [DONE]\n\n",
+  ]);
+  assert.equal(typeof transform.firstTokenAt(), "number");
+  assert.equal(transform.reasoningStreamed(), false);
+});
