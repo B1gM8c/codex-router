@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Control Center loads Codex account usage again when both account reads
+  answer.** The conflict resolution that merged #662 onto #648 renamed the
+  shared normalizer to `partialUsage` but left the both-answered call site on
+  the removed `usageFromReplies`, so every healthy poll threw a
+  `ReferenceError` and Control Center painted "Some router data could not
+  load" over the snapshot. The test fake answered synchronously from inside
+  the probe's guarded stdin write, whose `catch` swallowed the error; it now
+  has a `deferred` mode that answers on a later tick like a real pipe, and a
+  both-answered test that fails without the fix.
+
 - **Tok/s counts reasoning tokens exactly when they were generated inside the
   timed window.** The Sep 5 change subtracted `reasoning_tokens` from the
   numerator on every route, but the first-token clock already started on the
