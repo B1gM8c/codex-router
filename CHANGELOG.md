@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **DeepSeek empty-completion guard allows large reasoning after liveness
+  release.** Issue #684: Direct DeepSeek V4.1 Flash MCP turns with large
+  reasoning deltas no longer hit the empty-completion byte limit prematurely.
+  After liveness is established (by initial reasoning or content), the guard
+  uses a 10MB limit for incomplete SSE blocks instead of the 1MB pre-liveness
+  limit. This accommodates legitimate large reasoning events delivered in
+  small network chunks while still protecting against unbounded/malformed
+  streams. Fixes #684.
 - **DeepSeek V4.1 Flash is available on four providers, alongside V4.**
   DeepSeek released V4.1 Flash on 2026-09-10. New routes:
   `deepseek/deepseek-v4.1-flash` (1M window, image input, thinking with
