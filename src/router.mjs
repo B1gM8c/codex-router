@@ -339,11 +339,14 @@ function fetchForRoute(route, url, init) {
 }
 
 // Codex sends the service tier the operator picked, and a priority tier bills
-// at a higher rate. Only grok-oauth/grok-4.6 advertises one, so every other
-// routed body -- a failover candidate or a compaction included -- goes out
-// without it.
+// at a higher rate. A routed body keeps it only when the route that will serve
+// it advertises that tier (checked-in or curated `serviceTiers`), so a failover
+// candidate or a compaction for another route never inherits a tier it did not
+// offer.
 function applyRoutedServiceTier(body, payload, route) {
-  delete body.service_tier;
+  if (!route?.serviceTiers?.some((entry) => entry?.id === payload.service_tier)) {
+    delete body.service_tier;
+  }
   if (route?.slug !== "grok-oauth/grok-4.6") return body;
   const tier = knownServiceTier(payload.service_tier);
   // Locked LiteLLM loses the Responses service_tier argument at its Chat

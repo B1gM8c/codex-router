@@ -638,13 +638,53 @@ test("a Fast Grok turn never reaches a failover candidate at priority, and activ
     assert.equal(result.status, 200, result.body);
     assert.match(result.body, /answered-by-fallback/);
     assert.equal(seen.length, 2);
-    assert.equal("service_tier" in seen[0], false);
+    // Grok 4.6 advertises priority, so its own body keeps the tier (and the
+    // extra_body copy the locked gateway needs).
+    assert.equal(seen[0].service_tier, "priority");
     assert.equal(seen[0].extra_body?.service_tier, "priority");
     assert.equal(seen[1].model, FALLBACK.gatewayModel);
     assert.equal("service_tier" in seen[1], false, JSON.stringify(seen[1]));
     assert.equal(seen[1].extra_body?.service_tier, undefined);
   } finally {
     releaseCandidate();
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+test("a curated route that advertises a service tier still receives it", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    seen.push(await bodyJson(request));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(contentSse("curated-tier"));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), {
+    userModels: [{
+      ...GROQ_CANDIDATE,
+      serviceTiers: [{ id: "priority", name: "Fast", description: "Fixture priority tier." }],
+    }],
+  });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const advertised = await readRouted(routerPort, {
+      ...TURN_BODY,
+      model: GROQ_CANDIDATE.slug,
+      service_tier: "priority",
+    });
+    assert.equal(advertised.status, 200, advertised.body);
+    const unadvertised = await readRouted(routerPort, {
+      ...TURN_BODY,
+      model: GROQ_CANDIDATE.slug,
+      service_tier: "flex",
+    });
+    assert.equal(unadvertised.status, 200, unadvertised.body);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0].service_tier, "priority");
+    assert.equal(seen[0].extra_body?.service_tier, undefined, "only Grok 4.6 needs the extra_body copy");
+    assert.equal("service_tier" in seen[1], false, JSON.stringify(seen[1]));
+  } finally {
     await stopChild(child);
     await closeServer(gw.server);
   }

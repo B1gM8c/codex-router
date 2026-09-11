@@ -100,6 +100,17 @@ test("any terminal event, typed or untyped, stops the heartbeat", async () => {
   }
 });
 
+test("a terminal too large to parse still stops the heartbeat", async () => {
+  const heartbeat = new ResponsesHeartbeatTransform({ intervalMs: 30 });
+  const read = collect(heartbeat);
+  const oversized = `data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"${"x".repeat(4 * 1024 * 1024 + 16)}"}]}]}}\n\n`;
+  heartbeat.write(CREATED);
+  heartbeat.write(oversized);
+  await delay(150);
+  assert.equal(heartbeats(read()).length, 0, "a heartbeat followed an oversized terminal");
+  heartbeat.destroy();
+});
+
 test("an active stream never receives a heartbeat", async () => {
   const heartbeat = new ResponsesHeartbeatTransform({ intervalMs: 80 });
   const read = collect(heartbeat);

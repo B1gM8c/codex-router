@@ -50,10 +50,12 @@
   optional progress-only retry that fails, is incomplete, or ends without a
   terminal keeps the first, already-successful answer instead of replacing it
   with an error. Provider-reported counts from a rejected attempt are logged.
-- **Fast is never sent where it was not offered.** A `priority` request on
-  `grok-oauth/grok-4.6` is no longer forwarded to a failover candidate or to a
-  compaction for another route, and a usage row covering two attempts no longer
-  carries one attempt's tier.
+- **Fast is never sent where it was not offered.** A routed body keeps
+  `service_tier` only when the route serving it advertises that tier, so a
+  `priority` request on `grok-oauth/grok-4.6` no longer reaches a failover
+  candidate or a compaction for another route, while a curated model that
+  advertises a tier still receives it. A usage row covering two attempts no
+  longer carries one attempt's tier.
 - **Request activity is accurate on every path.** The routed transport retry and
   failover candidates count as observed attempts, a candidate waiting for
   headers is attributed to itself, and a `response.completed` carrying a failed

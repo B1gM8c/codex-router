@@ -16,9 +16,10 @@ subscription billing or account entitlement.
 
 LiteLLM 1.96.0 drops the normal Responses `service_tier` argument on the Chat
 bridge, so Router copies known values into `extra_body` on this exact route.
-The Grok forwarder copies the value only for upstream model `grok-4.6`. Every
-other routed body goes out without `service_tier`: a turn that fails over from
-Grok 4.6 to another model, or a compaction for another route, is never sent a
+The Grok forwarder copies the value only for upstream model `grok-4.6`. A
+routed body keeps `service_tier` only when the route serving it advertises that
+tier (checked-in or curated `serviceTiers`): a turn that fails over from Grok
+4.6 to another model, or a compaction for another route, is never sent a
 priority request that route did not offer.
 
 The actual tier is taken only from the upstream terminal response. Streaming

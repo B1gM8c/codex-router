@@ -467,10 +467,18 @@ router therefore relays a `response.in_progress` event that carries only the
 response's own id, model, and creation time. It is sent only between complete
 events and never after a terminal event. `CODEX_ROUTER_GROK_HEARTBEAT_MS` sets
 the interval (default 60000, at most 240000). Other routes receive no heartbeat.
+The gateway's Grok `stream_timeout` is written into the LiteLLM configuration
+from the environment of whichever process renders it, including a model
+curation run. After changing `CODEX_ROUTER_GROK_STREAM_STALL_MS`, restart the
+service so the router and gateway use the same bound.
 
 A failure the upstream states before any content (`error`, `response.failed`,
 or `response.incomplete`) is released to the client at once and is never
-retried as an empty completion. When the forwarder rejects a failed Grok
+retried as an empty completion. On the WebSocket edge, if the gateway keeps its
+stream open for more than five seconds after such a failure, the router stops
+waiting so the client's next request is not queued behind it; that turn is then
+recorded as canceled (status 0) rather than with the provider's failure status.
+When the forwarder rejects a failed Grok
 attempt, its `upstream-terminal-failed=true` log line carries any
 provider-reported `input_tokens` and `output_tokens`; the router's usage row for
 that attempt has no token counts.

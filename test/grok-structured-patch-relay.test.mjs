@@ -150,6 +150,16 @@ test("raw custom input cannot bypass an enabled structured codec", async () => {
   }
 });
 
+test("a raw custom call cannot bypass the codec under an undeclared namespace", async () => {
+  const bridge = setup();
+  const call = { type: "custom_tool_call", namespace: "functions", name: "apply_patch", id: "bypass_ns", call_id: "bypass_ns", input: patch };
+  for (const parts of [[frame("response.output_item.added", { item: call })], [frame("response.output_item.done", { item: call })], [frame("response.completed", { response: { output: [call] } })]]) {
+    const result = await relay(bridge, parts);
+    assert.ok(result.error, JSON.stringify(parts));
+    assert.equal(result.output, "");
+  }
+});
+
 test("delta, done, close and terminal disagreement fail closed", async () => {
   const changed = JSON.stringify({ operations: [{ op: "delete", path: "hello.txt" }] });
   for (const stage of ["delta", "close", "terminal", "duplicate-close", "orphan-delta"]) {

@@ -3001,13 +3001,18 @@ export class NamespaceToolCallTransform extends Transform {
 
   #nativeCodecBypass(item) {
     if (!this.#requiresCodec || item?.type !== "custom_tool_call") return false;
-    for (const [providerName, nativeName] of this.#lookups.customTools) {
-      if (
-        item.namespace === undefined && nativeName === item.name &&
-        this.#lookups.customCodecs.has(providerName)
-      ) return true;
+    let codecBackedName = false;
+    for (const [providerName, native] of this.#lookups.customTools) {
+      if (typeof native === "object") {
+        // A declared namespaced custom tool owns its identity and has no codec.
+        if (native.namespace === item.namespace && native.name === item.name) return false;
+      } else if (native === item.name && this.#lookups.customCodecs.has(providerName)) {
+        codecBackedName = true;
+      }
     }
-    return false;
+    // A raw call carrying a codec-backed bare name, with or without a namespace
+    // nobody declared, would reach the client without the codec's checks.
+    return codecBackedName;
   }
 
   #disableSseRewriting() {

@@ -104,6 +104,11 @@ export class ResponsesHeartbeatTransform extends Transform {
         // Not JSON: nothing to learn from this block.
       }
     }
+    // An event too large to parse can still be a terminal. Its top-level type
+    // precedes the payload it carries, so read it from the start of the data.
+    if (type === undefined && dataText && dataText.length > MAX_SNAPSHOT_EVENT_CHARS) {
+      type = /"type"\s*:\s*"([^"]{1,64})"/.exec(dataText.slice(0, 256))?.[1];
+    }
     if (TERMINAL_EVENT_TYPES.has(type) || dataText === "[DONE]") {
       this.#stop();
       return;
