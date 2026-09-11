@@ -2687,7 +2687,9 @@ async function summarizeWith(
   ) {
     return { searchCapabilityChanged: true };
   }
-  const upstream = await fetch(routedResponsesTarget(route), {
+  // Compaction is another hop on the route's transport: a Grok summary can
+  // reason for as long as a turn, so it uses the same long-idle pool.
+  const upstream = await fetchForRoute(route, routedResponsesTarget(route), {
     method: "POST",
     headers: routedHeaders(),
     body: serialized,
@@ -4407,13 +4409,15 @@ async function handleResponses(request, response, requestUrl) {
       !nativeCompletedBeforeClose;
     finalStatus = clientWalkedAway ? 0 : upstream.status;
     if (
-      !clientWalkedAway &&
       route?.provider === "grok-oauth" &&
       usageTransform?.terminalErrorObserved?.() === true
     ) {
       // The Grok forwarder has already committed the HTTP 200 SSE head when a
       // post-tool repair can fail. Keep the client-visible terminal event, but
-      // account for the turn as a provider failure rather than a success.
+      // account for the turn as a provider failure rather than a success. That
+      // holds when the client leaves afterwards too: the WebSocket edge aborts
+      // a stream the gateway keeps open after its failure, and a failure that
+      // already happened is not a canceled generation.
       finalStatus = 502;
     }
     if (streamedPreludeFailureKind && !clientWalkedAway) finalStatus = 502;

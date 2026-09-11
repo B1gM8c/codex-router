@@ -54,7 +54,10 @@ export function installStableFetchTransport({
 // pool keeps Undici's 300s body idle bound for every other provider; a hop that
 // carries a Grok stream uses this separate pool instead, whose bound outlasts
 // the router's stall guard. The dispatcher class and proxy decision match the
-// shared pool, so only the idle bound differs.
+// shared pool, so only the idle bounds differ. The headers bound moves with the
+// body bound: a Grok compaction is not streamed, so the gateway answers its
+// headers only after the whole generation, and Undici's 300s headers default
+// would end a long compaction before the stall guard's allowance.
 const longIdleStreamDispatchers = new Map();
 
 export function longIdleStreamDispatcher(bodyTimeoutMs, {
@@ -70,6 +73,7 @@ export function longIdleStreamDispatcher(bodyTimeoutMs, {
       : AgentClass;
     dispatcher = new DispatcherClass({
       ...fetchDispatcherOptions(),
+      headersTimeout: bodyTimeoutMs,
       bodyTimeout: bodyTimeoutMs,
     });
     longIdleStreamDispatchers.set(bodyTimeoutMs, dispatcher);

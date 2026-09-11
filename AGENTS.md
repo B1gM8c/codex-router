@@ -2012,10 +2012,13 @@ xAI and Codex has its own idle limit. The router's post-prologue stall guard
 (`CODEX_ROUTER_GROK_STREAM_STALL_MS`, ten minutes) is the one meant to decide.
 
 1. **Every transport hop outlasts the guard.** `src/grok-stream-timeouts.mjs`
-   sizes the router's Grok gateway pool, the gateway's per-deployment
-   `stream_timeout`, and the forwarder's xAI pool from that one value. A new hop
-   on the Grok path takes its bound from there. The shared Undici pool keeps its
-   default for every other provider.
+   sizes the router's Grok gateway pool (its headers and body bounds), the
+   gateway's per-deployment `stream_timeout` and non-streaming `timeout`, and
+   the forwarder's xAI pool from that one value. Compaction is a hop too: it is
+   not streamed, so its headers arrive only after the whole generation, and it
+   uses the same pool and deployment bound as a turn. A new hop on the Grok path
+   takes its bound from there. The shared Undici pool keeps its default for
+   every other provider.
 2. **Codex's idle timer is fed a lifecycle event, never a comment.** Codex
    abandons a stream after five minutes without a parsed data event and sends
    the whole turn again, which bills the provider twice; an SSE comment or a

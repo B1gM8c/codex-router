@@ -65,10 +65,15 @@ export function renderLiteLlmConfig() {
       '      api_key: "os.environ/CODEX_ROUTER_INTERNAL_KEY"',
       ...(responsesSurface ? [] : ["      use_chat_completions_api: true"]),
       // A Grok OAuth turn can be silent for minutes while it reasons, so its
-      // stream timeout outlasts the router's stall guard. Every other
-      // deployment keeps the global request_timeout below.
+      // stream timeout outlasts the router's stall guard. Compaction reaches
+      // the same deployment without streaming, where `timeout` applies
+      // instead, so it gets the same bound. Every other deployment keeps the
+      // global request_timeout below.
       ...(model.provider === "grok-oauth"
-        ? [`      stream_timeout: ${grokGatewayStreamTimeoutSeconds()}`]
+        ? [
+            `      stream_timeout: ${grokGatewayStreamTimeoutSeconds()}`,
+            `      timeout: ${grokGatewayStreamTimeoutSeconds()}`,
+          ]
         : []),
       "",
     );

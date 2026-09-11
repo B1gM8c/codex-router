@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Grok compaction keeps the Grok transport bounds, and a failed Grok turn
+  stays a failure when the client leaves.** A Grok OAuth compaction now uses
+  the same long-idle router pool and gateway `timeout` as a streamed turn, so a
+  long summary is no longer cut off by the 300-second Undici or 600-second
+  gateway defaults. A Grok turn that already delivered a terminal error is
+  metered and reported in `/activity` as a failure even if the client then
+  closes the still-open stream, which the WebSocket edge does five seconds
+  after a failure; it used to read as a user cancellation.
 - **DeepSeek V4.1 Flash is available on four providers, alongside V4.**
   DeepSeek released V4.1 Flash on 2026-09-10. New routes:
   `deepseek/deepseek-v4.1-flash` (1M window, image input, thinking with

@@ -91,7 +91,12 @@ test("a Grok long-idle pool raises only the body idle bound and keeps the proxy 
   const classes = { AgentClass: FakeAgent, EnvHttpProxyAgentClass: FakeEnvHttpProxyAgent, execArgv: [] };
   const direct = longIdleStreamDispatcher(660_001, { ...classes, environment: {} });
   assert.equal(direct.kind, "direct");
-  assert.deepEqual(direct.options, { allowH2: false, pipelining: 1, bodyTimeout: 660_001 });
+  assert.deepEqual(direct.options, {
+    allowH2: false,
+    pipelining: 1,
+    headersTimeout: 660_001,
+    bodyTimeout: 660_001,
+  });
   assert.equal(longIdleStreamDispatcher(660_001), direct, "one pool per bound, not one per request");
   const proxied = longIdleStreamDispatcher(660_002, {
     ...classes,
@@ -119,6 +124,33 @@ test("the long-idle fetch honors its body idle bound on a real socket", async ()
     const impatient = await longIdleStreamFetch(url, {}, { bodyTimeoutMs: 100 });
     await assert.rejects(impatient.text(), (error) =>
       [error?.code, error?.cause?.code].includes("UND_ERR_BODY_TIMEOUT"));
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("the long-idle fetch honors the same bound for response headers", async () => {
+  // A non-streaming Grok compaction receives its headers only after the whole
+  // generation, so a pause before the head must be bounded like a pause
+  // between body chunks rather than by Undici's 300s headers default.
+  const server = http.createServer((_request, response) => {
+    const timer = setTimeout(() => {
+      response.writeHead(200, { "Content-Type": "text/plain" });
+      response.end("late head");
+    }, 2_500);
+    response.once("close", () => clearTimeout(timer));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  try {
+    const patient = await longIdleStreamFetch(url, {}, { bodyTimeoutMs: 10_000 });
+    assert.equal(await patient.text(), "late head");
+    // Negative control: the same delay before the head trips a shorter bound.
+    await assert.rejects(
+      longIdleStreamFetch(url, {}, { bodyTimeoutMs: 100 }),
+      (error) => [error?.code, error?.cause?.code].includes("UND_ERR_HEADERS_TIMEOUT"),
+    );
   } finally {
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
