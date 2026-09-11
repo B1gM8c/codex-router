@@ -62,6 +62,14 @@
 - **Grok gateway stream errors reach Codex as terminal failures.** Untyped
   gateway errors are normalized without exposing upstream diagnostics or
   appending empty message closes, and request activity records the failure.
+- **Grok compaction keeps the Grok transport bounds, and a failed Grok turn
+  stays a failure when the client leaves.** A Grok OAuth compaction now uses
+  the same long-idle router pool and gateway `timeout` as a streamed turn, so a
+  long summary is no longer cut off by the 300-second Undici or 600-second
+  gateway defaults. A Grok turn that already delivered a terminal error is
+  metered and reported in `/activity` as a failure even if the client then
+  closes the still-open stream, which the WebSocket edge does five seconds
+  after a failure; it used to read as a user cancellation.
 - **Grok OAuth streams survive long reasoning pauses end to end.** After the
   prologue is released, a Grok OAuth turn uses a ten-minute stall bound
   (`CODEX_ROUTER_GROK_STREAM_STALL_MS`, positive milliseconds; invalid or
