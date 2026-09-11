@@ -7771,6 +7771,154 @@ test("native redirect falls back to native when the target cannot route", async 
   }
 });
 
+test("router refuses a provider-prefixed slug it has no route for instead of forwarding it to ChatGPT (#689)", async () => {
+  const nativeRequests = [];
+  const native = await mockServer(async (request, response) => {
+    nativeRequests.push({ url: request.url, body: await bodyJson(request) });
+    json(response, 200, { route: "native" });
+  });
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(await bodyJson(request));
+    json(response, 200, { route: "external" });
+  });
+  const routerPort = await openPort();
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-unrouted-slug-"));
+  const stateDir = path.join(testRoot, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const genericProviders = path.join(testRoot, "generic-providers.json");
+  writeFileSync(genericProviders, `${JSON.stringify({
+    version: 1,
+    providers: [{
+      id: "unorouter",
+      displayName: "UnoRouter",
+      baseUrl: "https://unorouter.example.test/v1",
+      adapter: "openai-chat",
+      headers: {},
+      allowPrivate: false,
+      enabled: true,
+    }],
+  })}\n`);
+  const userModel = (upstreamModel, extra = {}) => ({
+    slug: `unorouter/${upstreamModel}`,
+    gatewayModel: `unorouter-${upstreamModel}`,
+    upstreamModel,
+    provider: "unorouter",
+    listed: true,
+    displayName: `${upstreamModel} (curated)`,
+    description: "Test fixture.",
+    priority: 500,
+    defaultEffort: "medium",
+    reasoningLevels: [{ effort: "medium", description: "Balanced reasoning" }],
+    contextWindow: 131072,
+    autoCompact: 110000,
+    inputModalities: ["text"],
+    compHash: `unorouter-${upstreamModel}-user-v1`,
+    ...extra,
+  });
+  const userModels = path.join(testRoot, "user-models.json");
+  writeFileSync(userModels, `${JSON.stringify({
+    version: 1,
+    models: [
+      // A sibling that loads, as in the report: other unorouter/* models work.
+      userModel("uno-mini"),
+      // The reported slug, skipped at load. Its picker entry would still
+      // exist, but the live router has no route for it.
+      userModel("gpt-6-astra", { multiAgentVersion: "v2" }),
+    ],
+  })}\n`);
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_STATE_DIR: stateDir,
+    MODEL_ROUTER_GENERIC_PROVIDERS: genericProviders,
+    MODEL_ROUTER_USER_MODELS: userModels,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const post = (pathname, model, input = "turn") =>
+    fetch(`${routerBase(routerPort)}${pathname}`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model, input }),
+    });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+
+    const refused = await post("/responses", "unorouter/gpt-6-astra");
+    assert.equal(refused.status, 400);
+    const refusal = (await refused.json()).error;
+    assert.equal(refusal.type, "invalid_request_error");
+    assert.equal(refusal.code, "unrouted_model");
+    assert.equal(refusal.param, "model");
+    assert.match(refusal.message, /"unorouter\/gpt-6-astra" has no route in this running router/);
+    assert.match(refusal.message, /Provider "unorouter" is registered and enabled/);
+    assert.match(refusal.message, /skipped the user model with this slug: .*multiAgentVersion v2/);
+    assert.match(refusal.message, /bin\/control service restart/);
+    assert.doesNotMatch(refusal.message, /unorouter\.example\.test|CODEX_CALLER_SECRET|_codex-router/);
+    assert.equal(nativeRequests.length, 0, "an unrouted prefixed slug must not reach ChatGPT");
+    assert.equal(gatewayRequests.length, 0);
+
+    // Compaction V1 enters through the same handler and must refuse the same way.
+    const compact = await post("/responses/compact", "unorouter/gpt-6-astra", [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "compact" }] },
+    ]);
+    assert.equal(compact.status, 400);
+    assert.equal((await compact.json()).error.code, "unrouted_model");
+
+    const unknownProvider = await post("/responses", "nosuch/model");
+    assert.equal(unknownProvider.status, 400);
+    assert.match((await unknownProvider.json()).error.message, /No enabled provider named "nosuch"/);
+    assert.equal(nativeRequests.length, 0);
+
+    // A registered prefixed slug still routes to the gateway.
+    const routed = await post("/responses", "unorouter/uno-mini");
+    assert.equal(routed.status, 200);
+    assert.equal(gatewayRequests.at(-1).model, "unorouter-uno-mini");
+
+    // An unprefixed native slug -- even one sharing the upstream id above --
+    // is still native passthrough, unchanged.
+    const nativeTurn = await post("/responses", "gpt-6-astra");
+    assert.equal(nativeTurn.status, 200);
+    assert.equal(nativeRequests.length, 1);
+    assert.equal(nativeRequests[0].body.model, "gpt-6-astra");
+    assert.equal(gatewayRequests.length, 1);
+
+    // Native aliases and the native redirect are read per request and keep
+    // serving unprefixed slugs; the redirect does not swallow an unrouted
+    // prefixed slug.
+    writeFileSync(
+      path.join(stateDir, "native-aliases.json"),
+      `${JSON.stringify({ version: 1, aliases: { "gpt-5.5": "unorouter/uno-mini" } })}\n`,
+    );
+    writeFileSync(
+      path.join(stateDir, "native-redirect.json"),
+      `${JSON.stringify({ version: 1, model: "kimi-oauth/k3" })}\n`,
+    );
+    const aliased = await post("/responses", "gpt-5.5");
+    assert.equal(aliased.status, 200);
+    assert.equal(gatewayRequests.at(-1).model, "unorouter-uno-mini");
+    const redirected = await post("/responses", "gpt-5.6-luna");
+    assert.equal(redirected.status, 200);
+    assert.equal(gatewayRequests.at(-1).model, "kimi-oauth-k3");
+    const stillRefused = await post("/responses", "unorouter/gpt-6-astra");
+    assert.equal(stillRefused.status, 400);
+    assert.equal((await stillRefused.json()).error.code, "unrouted_model");
+    assert.equal(gatewayRequests.length, 3);
+    assert.equal(nativeRequests.length, 1);
+    assert.ok(nativeRequests.every((entry) => !String(entry.body.model).includes("/")));
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    await closeServer(gateway.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 function usageEvents(stateDir) {
   const file = path.join(stateDir, "usage-events.jsonl");
   if (!existsSync(file)) return [];

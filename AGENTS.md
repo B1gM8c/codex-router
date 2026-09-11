@@ -2286,6 +2286,39 @@ the same OS user to sign in or authorize once per harness buys nothing.
 - `doctor` reports it as its own line, because "open Codex once" is the fix and
   nothing else would say so.
 
+## A provider-prefixed slug is never forwarded to ChatGPT
+
+`handleResponses` treats a model it has no route for as native GPT traffic and
+forwards it to chatgpt.com. That is correct only for native slugs, and no native
+slug contains a `/`: not the captured account catalog, not the context variants
+in `src/native-context-variants.mjs`, not the native-alias keys or the
+native-redirect sources. Every routed slug is `provider/model`.
+
+So a slug containing `/` that resolves to no route — exact slug, migration or
+curation alias, or native alias — is refused locally with HTTP 400,
+`invalid_request_error`, code `unrouted_model` (`src/unrouted-model.mjs`),
+before native redirect or native passthrough can take it. Issue #689 is why: a
+user model added to `user-models.json` after the service started reached the
+Codex picker (the catalog is rebuilt in another process) but not the live
+router's `MODEL_BY_SLUG`, went to ChatGPT, and came back as "The 'vendor/model'
+model is not supported when using Codex with a ChatGPT account" — which reads
+as an OpenAI restriction and sent the user's prompt to OpenAI besides.
+
+- Keep the check ahead of `readNativeRedirect()`. The redirect exists for
+  Codex's background sessions on native slugs; it must not quietly serve a
+  mistyped or unloaded routed model with some other model.
+- The message names the slug, whether its prefix is a registered and enabled
+  provider, and the reason `mergeUserModels` skipped a user model with that slug
+  (`USER_MODELS_SKIPPED`), and points at `bin/control service restart` and
+  `user-models.json`. It never carries a credential, caller key, base URL, or
+  path. It does not probe credentials: that spawns keychain lookups.
+- Client surfaces already resolve their own prefixes before re-entering this
+  path — Claude strips `codex_router/anthropic/`, Cursor maps its neutral ids to
+  the slug, Gemini, DeepSeek Harness, and OpenClaw send the router slug — and the
+  Responses WebSocket re-enters over HTTP, so this one check covers them.
+- If a native namespace with a `/` ever appears, narrow the rule to prefixes
+  that are not that namespace; do not drop it.
+
 ## A client the tray cannot watch keeps the router on
 
 The tray's presence setting can tie the router to the Codex and ChatGPT desktop

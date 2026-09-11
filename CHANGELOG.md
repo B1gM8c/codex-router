@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **A routed model the router has not loaded now fails locally, not at
+  ChatGPT.** A model added to or renamed in `user-models.json` shows up in the
+  Codex picker as soon as the catalog is rebuilt, but the running router reads
+  its routes only at startup. Until the service restarted, the router forwarded
+  that slug to ChatGPT like a native model, and the turn failed with "The
+  'unorouter/gpt-6-astra' model is not supported when using Codex with a
+  ChatGPT account". That read as an OpenAI restriction, and the prompt went to
+  OpenAI besides. A user model the registry skipped as invalid failed the same
+  way (#689). No native slug contains a `/`, so the router now answers a
+  `provider/model` slug it has no route for with HTTP 400 `unrouted_model`
+  before the native redirect or passthrough can take it. The message names the
+  slug, says whether its provider is registered and enabled, gives the reason a
+  user model with that slug was skipped, and says to restart with
+  `bin/control service restart`. Native slugs, native aliases, the native
+  redirect, and routed slugs behave as before. `doctor` now warns about each
+  skipped user model that has no route.
 - **Routed models' turns now render like native ones in Codex.** Native models
   label each assistant message `commentary` (a progress note before more tool
   calls) or `final_answer`, and Codex folds commentary into "Worked for ..."
