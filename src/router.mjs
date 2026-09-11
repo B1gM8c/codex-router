@@ -64,6 +64,7 @@ import {
 } from "./zai-responses-compat.mjs";
 import { grokReasoningSummaryCompatTransform } from "./grok-reasoning-summary-compat.mjs";
 import { ResponsesHeartbeatTransform } from "./responses-heartbeat.mjs";
+import { messagePhaseTransform } from "./message-phase.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import {
   deepSeekCustomToolNames,
@@ -4370,6 +4371,12 @@ async function handleResponses(request, response, requestUrl) {
         ? itemLifecycleNormalizerTransform(contentType)
         : undefined;
       if (itemNormalizer) transforms.push(itemNormalizer);
+      // Routed providers never label assistant messages, so Codex could not
+      // fold progress notes into "Worked for ..." or find the final answer.
+      // Label them from the now-sequential item order; a provider's own phase
+      // always wins. Native streams already carry the label and gain no stage.
+      const messagePhase = route ? messagePhaseTransform(contentType) : undefined;
+      if (messagePhase) transforms.push(messagePhase);
       // Last, so no router stage ever parses a heartbeat: while a Grok stream is
       // silent, keep the client's idle timer from abandoning a live turn.
       if (

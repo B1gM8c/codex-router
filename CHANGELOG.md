@@ -11,7 +11,32 @@
   the probe's guarded stdin write, whose `catch` swallowed the error; it now
   has a `deferred` mode that answers on a later tick like a real pipe, and a
   both-answered test that fails without the fix.
-
+- **Routed models' turns now render like native ones in Codex.** Native models
+  label each assistant message `commentary` (a progress note before more tool
+  calls) or `final_answer`, and Codex folds commentary into "Worked for ..."
+  and shows the final answer below it. Routed providers never send the label,
+  so every progress note rendered as a standalone answer. The router now labels
+  routed messages from the stream's item order: a message another item follows
+  is commentary, and the last message of a completed response is the final
+  answer. A phase the provider sent always wins, text still streams live, and
+  failed or unterminated responses are relayed unlabelled. The label costs no
+  model tokens, and LiteLLM drops it from history before any chat-completions
+  provider sees it.
+- **`apply_patch` calls no longer abort routed turns mid-stream when a model
+  skips LiteLLM's wrapper.** LiteLLM sends native custom tools such as
+  `apply_patch` to Chat Completions providers as a function with one `content`
+  string, and relays whatever arguments come back. Models do not always comply:
+  they put `content` after another key, answer `{"input": ...}` or `{}`, or send
+  the raw patch. The router accepted only a leading `{"content": "..."}` and
+  aborted the already-streaming response, and Codex retried the identical turn
+  until it failed ("stream closed before response.completed"). The router log
+  showed "invalid custom tool arguments done" or "incomplete custom tool
+  argument delta sequence" on DeepSeek V4.1 Flash, DeepSeek V4 Flash, GLM-5.3,
+  and Grok 4.5. The relay now derives the input exactly as LiteLLM does, so
+  Codex receives the same call LiteLLM produced and a malformed patch comes
+  back to the model as an ordinary tool error. A non-string `content`, a
+  completed item that disagrees, and streamed text contradicted by the final
+  input still fail closed. Reproduced offline against pinned LiteLLM 1.96.0.
 - **Switching a conversation back to OpenAI no longer fails on routed item IDs.**
   Routed providers mint their own item IDs (`call_...`, `tool_...`,
   `chatcmpl-...`), Codex saves them, and OpenAI rejects them on replay with

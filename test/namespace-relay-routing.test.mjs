@@ -2583,3 +2583,127 @@ test("real Router requires both hook opt-ins and exact model, without affecting 
     if (old) assert.equal(JSON.parse(result.clientBody).output[0].input, serializeStructuredPatch(STRUCTURED_OPERATIONS));
   }
 });
+
+test("routed turns label assistant messages the way native turns do", async () => {
+  const assistantMessage = (id, text) => ({
+    id,
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text, annotations: [] }],
+  });
+  const messageEvents = (index, item) => [
+    sseEvent({ type: "response.output_item.added", output_index: index, item: { ...item, content: [] } }),
+    sseEvent({ type: "response.output_text.delta", output_index: index, item_id: item.id, delta: item.content[0].text }),
+    sseEvent({ type: "response.output_item.done", output_index: index, item }),
+  ];
+  const lastMessage = (body, id) =>
+    responseItemsFromSse(body).filter((item) => item.type === "message" && item.id === id).at(-1);
+
+  const toolTurn = await scenario(true, {
+    model: "opencode-go/deepseek-v4.1-flash",
+    sseBody: () => [
+      sseEvent({ type: "response.created", response: { id: "resp_note" } }),
+      ...messageEvents(0, assistantMessage("msg_note", "Checking the config.")),
+      sseEvent({
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { type: "function_call", name: "exec_command", call_id: "call_exec", arguments: "" },
+      }),
+      sseEvent({
+        type: "response.output_item.done",
+        output_index: 1,
+        item: { type: "function_call", name: "exec_command", call_id: "call_exec", arguments: "{}" },
+      }),
+      sseEvent({ type: "response.completed", response: { id: "resp_note", output: [] } }),
+      "data: [DONE]\n\n",
+    ].join(""),
+  });
+  assert.equal(lastMessage(toolTurn.clientBody, "msg_note").phase, "commentary");
+  assert.equal(functionCallsFromSse(toolTurn.clientBody).get("call_exec").phase, undefined);
+
+  const answerTurn = await scenario(true, {
+    model: "opencode-go/deepseek-v4.1-flash",
+    sseBody: () => [
+      sseEvent({ type: "response.created", response: { id: "resp_answer" } }),
+      ...messageEvents(0, assistantMessage("msg_answer", "Done.")),
+      sseEvent({ type: "response.completed", response: { id: "resp_answer", output: [] } }),
+      "data: [DONE]\n\n",
+    ].join(""),
+  });
+  assert.equal(lastMessage(answerTurn.clientBody, "msg_answer").phase, "final_answer");
+});
+
+test("routed native apply_patch relays LiteLLM arguments that are not a leading content wrapper", async () => {
+  const patch = "*** Begin Patch\n*** Update File: src/a.js\n@@\n-const a = 1;\n+const re = /\\d+/;\n*** End Patch";
+  // What pinned LiteLLM 1.96 emits when the provider's arguments are not a
+  // leading {"content": ...} wrapper: legacy argument events carry the
+  // provider text verbatim, and the completed custom_tool_call carries
+  // unwrap_custom_tool_arguments() of it.
+  const calls = [
+    { id: "call_input_key", arguments: JSON.stringify({ input: patch }), input: JSON.stringify({ input: patch }) },
+    { id: "call_content_second", arguments: JSON.stringify({ path: "src/a.js", content: patch }), input: patch },
+  ];
+  const sseBody = () => [
+    sseEvent({ type: "response.created", response: { id: "resp_litellm_custom" } }),
+    ...calls.flatMap((call, index) => [
+      sseEvent({
+        type: "response.output_item.added",
+        output_index: index,
+        item: { type: "custom_tool_call", id: call.id, call_id: call.id, name: "apply_patch", input: "", status: "in_progress" },
+      }),
+      ...call.arguments.match(/[\s\S]{1,10}/g).map((delta) => sseEvent({
+        type: "response.function_call_arguments.delta",
+        output_index: index,
+        item_id: call.id,
+        delta,
+      })),
+      sseEvent({
+        type: "response.function_call_arguments.done",
+        output_index: index,
+        item_id: call.id,
+        arguments: call.arguments,
+      }),
+      sseEvent({
+        type: "response.output_item.done",
+        output_index: index,
+        item: { type: "custom_tool_call", id: call.id, call_id: call.id, name: "apply_patch", input: call.input, status: "completed" },
+      }),
+    ]),
+    sseEvent({ type: "response.completed", response: { id: "resp_litellm_custom", output: [] } }),
+    "data: [DONE]\n\n",
+  ].join("");
+  const result = await scenario(true, {
+    model: "opencode-go/deepseek-v4.1-flash",
+    requestPayload: (stream, model) => ({
+      model,
+      stream,
+      input: "Apply the patch.",
+      tools: [{
+        type: "custom",
+        name: "apply_patch",
+        description: "Apply a patch.",
+        format: { type: "grammar", syntax: "lark", definition: "start: /[\\s\\S]+/" },
+      }],
+    }),
+    sseBody,
+  });
+  assert.ok(
+    result.gatewayBodies[0].tools.some((tool) => tool.type === "custom" && tool.name === "apply_patch"),
+    "native apply_patch still reaches LiteLLM as a custom tool",
+  );
+  const events = result.clientBody.split(/\r?\n/)
+    .filter((line) => line.startsWith("data: {"))
+    .map((line) => JSON.parse(line.slice(6)));
+  assert.equal(events.some((event) => event.type === "error" || event.type === "response.failed"), false);
+  assert.ok(events.some((event) => event.type === "response.completed"), "the turn completes instead of aborting");
+  for (const call of calls) {
+    const inputDone = events.find((event) =>
+      event.type === "response.custom_tool_call_input.done" && event.item_id === call.id);
+    assert.equal(inputDone?.input, call.input, `${call.id} input.done`);
+    const closed = events.find((event) =>
+      event.type === "response.output_item.done" && event.item?.call_id === call.id);
+    assert.equal(closed.item.type, "custom_tool_call");
+    assert.equal(closed.item.input, call.input, `${call.id} item input`);
+  }
+});

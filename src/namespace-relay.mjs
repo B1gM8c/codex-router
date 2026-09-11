@@ -2117,6 +2117,31 @@ function customToolInput(
   }
 }
 
+// LiteLLM decides a native custom call's input itself: it unwraps a string
+// `content` from a JSON object and otherwise keeps the provider's arguments
+// verbatim (`unwrap_custom_tool_arguments` in its custom_tools module). Its
+// completed item carries that decision, so the relay must derive the same
+// input rather than a stricter one. A present non-string `content` has no
+// faithful equivalent of Python's str() and stays unsupported.
+const LITELLM_MAX_CUSTOM_ARGUMENTS_LENGTH = 1_000_000;
+
+function litellmCustomToolInput(argumentsText) {
+  if (typeof argumentsText !== "string") return undefined;
+  if (argumentsText === "") return "";
+  if (argumentsText.length > LITELLM_MAX_CUSTOM_ARGUMENTS_LENGTH) return argumentsText;
+  let parsed;
+  try {
+    parsed = JSON.parse(argumentsText);
+  } catch {
+    return argumentsText;
+  }
+  if (!plainObject(parsed) || !Object.hasOwn(parsed, LITELLM_CUSTOM_TOOL_INPUT_PROPERTY)) {
+    return argumentsText;
+  }
+  const content = parsed[LITELLM_CUSTOM_TOOL_INPUT_PROPERTY];
+  return typeof content === "string" ? content : undefined;
+}
+
 function rewriteCustomToolFunctionCallItem(item, lookups, allowPlaceholder) {
   if (
     item?.type !== "function_call" ||
@@ -3348,6 +3373,10 @@ export class NamespaceToolCallTransform extends Transform {
   #customDeltaMismatch(state, inputFingerprint) {
     if (state.codec) return undefined; // Source JSON is checked separately; no patch delta was emitted.
     if (!state.sawArgumentDelta) return undefined;
+    // LiteLLM keeps arguments that are not a leading `content` wrapper verbatim,
+    // so the incremental decoder cannot follow them. When it emitted no input
+    // text, the client saw nothing the completed input could contradict.
+    if (state.sourceType === "custom_tool_call" && state.deltaCharacters === 0) return undefined;
     if (
       state.deltaState.invalid ||
       !state.deltaState.opened ||
@@ -3640,7 +3669,15 @@ export class NamespaceToolCallTransform extends Transform {
       }
       const rawDoneMatch = event?.type === "response.function_call_arguments.done"
         ? this.#specialCallForArgumentsEvent(event) : undefined;
-      const rawArgumentsDone = !rawDoneMatch?.reason && rawDoneMatch?.state?.codec?.preserveRawArguments === true;
+      // LiteLLM's native custom lifecycle keeps provider arguments verbatim when
+      // they are not its JSON wrapper. They are not function arguments to
+      // rewrite; the custom-tool check below validates them instead.
+      const rawArgumentsDone = !rawDoneMatch?.reason && (
+        rawDoneMatch?.state?.codec?.preserveRawArguments === true ||
+        (rawDoneMatch?.state?.kind === "custom" &&
+          rawDoneMatch.state.sourceType === "custom_tool_call" &&
+          !rawDoneMatch.state.codec)
+      );
       if (!embeddedFunctionArgumentsAreUnambiguous(event, this.#lookups, rawArgumentsDone)) {
         return this.#unsafeSseFrame(frame, "ambiguous function arguments");
       }
@@ -3742,7 +3779,9 @@ export class NamespaceToolCallTransform extends Transform {
             matched.state.sourceType === "custom_tool_call"
               ? LITELLM_CUSTOM_TOOL_INPUT_PROPERTY
               : CUSTOM_TOOL_INPUT_PROPERTY;
-          const input = customToolInput(event.arguments, false, argumentProperty, matched.state.codec);
+          const input = matched.state.sourceType === "custom_tool_call" && !matched.state.codec
+            ? litellmCustomToolInput(event.arguments)
+            : customToolInput(event.arguments, false, argumentProperty, matched.state.codec);
           if (input === undefined) {
             return this.#unsafeSseFrame(frame, "invalid custom tool arguments done");
           }

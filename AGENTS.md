@@ -725,6 +725,16 @@ and every client saw a bare "Connection error" naming nothing.
    contract. Keep the streamed-input fingerprint check and fail closed when the
    delta, terminal arguments, or output-item close disagree. The focused
    namespace-relay test and Z.ai router fixture hold both sides of this boundary.
+   The wrapper is a request, not a guarantee: models put `content` after another
+   key, answer `{ "input": ... }` or `{}`, or send raw patch text, and LiteLLM
+   relays those rather than rejecting them. For a native custom call the relay
+   therefore derives the input exactly as LiteLLM's
+   `unwrap_custom_tool_arguments` does -- a string `content` from a JSON
+   object, otherwise the arguments verbatim -- and never a stricter reading;
+   rejecting a shape LiteLLM accepted aborts a committed stream and Codex
+   retries the identical turn until it fails. A present non-string `content`
+   stays unsupported, and the delta check is skipped only when the decoder
+   emitted no input text for the client to contradict.
 11. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
    security floor and a wheel-availability decision (see the lock section
    above), any change to it has to be proven by booting the proxy rather than by
@@ -2045,6 +2055,33 @@ xAI and Codex has its own idle limit. The router's post-prologue stall guard
 4. Coverage lives in `test/grok-stream-timeouts.test.mjs`,
    `test/responses-heartbeat.test.mjs`, `test/fetch-transport.test.mjs`, and the
    Grok cases in `test/empty-completion-router.test.mjs`.
+
+## Routed assistant messages carry a phase label
+
+Native models label every assistant message `commentary` or `final_answer`.
+Codex folds commentary into its "Worked for ..." group, renders the final
+answer below it, and finds a thread's answer with
+`json_extract(item_json, '$.phase') = 'final_answer'`. Routed providers send no
+label, so `src/message-phase.mjs` assigns one.
+
+1. **The rule is the one native turns follow, read from item order.** A message
+   that another output item follows is commentary; the last message of a
+   `response.completed`, `response.incomplete`, or `response.done` is the final
+   answer. Never infer it from the text.
+2. **A provider's phase always wins.** Only an absent or null phase is filled,
+   so a Responses provider that already labels messages passes through
+   unchanged.
+3. **Hold one frame, briefly.** Only the message's `output_item.done` waits,
+   until the next item opens or the response settles; deltas stream live and
+   every frame held behind it is replayed in order. A failed, errored, or
+   unterminated response, invalid UTF-8, or an exhausted hold bound releases the
+   original bytes unlabelled.
+4. **It is metadata, not transcript.** It adds no text, costs no model tokens,
+   and LiteLLM rebuilds chat history from role and content, so a replayed label
+   never reaches a chat-completions provider.
+5. **Routed streams only, after the item-lifecycle normalizer**, so items are
+   already sequential. Coverage lives in `test/message-phase.test.mjs` and the
+   routed case in `test/namespace-relay-routing.test.mjs`.
 
 ## Routed subagent regression prevention
 
