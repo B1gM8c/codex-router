@@ -17,10 +17,14 @@ function fakeAppServer(replies) {
   const child = new EventEmitter();
   child.stdout = stdout;
   child.stdin = stdin;
-  child.kill = () => {
+  // A real ChildProcess emits `exit` when the process ends and `close` only
+  // once its stdio has drained, which is the order the probe depends on.
+  const end = (code, { exited = false } = {}) => {
+    if (!exited) child.emit("exit", code);
+    stdout.once("close", () => child.emit("close", code, null));
     stdout.end();
-    child.emit("exit", 0);
   };
+  child.kill = () => end(0);
   stdin.on("data", (chunk) => {
     for (const line of String(chunk).split("\n").filter(Boolean)) {
       let message;
@@ -30,7 +34,14 @@ function fakeAppServer(replies) {
         continue;
       }
       const reply = replies(message);
-      if (reply) stdout.write(`${JSON.stringify(reply)}\n`);
+      if (!reply) continue;
+      const { exitAfter, exitBeforeWrite, lines, ...payload } = reply;
+      // `exitBeforeWrite` reports the exit while replies are still unwritten,
+      // the way Node can surface `exit` before the stdout pipe is read.
+      if (exitBeforeWrite) child.emit("exit", 1);
+      const outbound = lines ?? (Object.keys(payload).length > 0 ? [payload] : []);
+      for (const item of outbound) stdout.write(`${JSON.stringify(item)}\n`);
+      if (exitAfter || exitBeforeWrite) end(1, { exited: Boolean(exitBeforeWrite) });
     }
   });
   return child;
@@ -253,6 +264,70 @@ test("a refused rateLimits read still returns usage instead of failing the panel
   assert.equal(value.secondary, null);
   assert.equal(value.summary.lifetimeTokens, 42);
   assert.deepEqual(value.dailyUsageBuckets, [{ startDate: "2026-09-01", tokens: 9 }]);
+});
+
+test("an app-server exit after one account read still returns that slice", async () => {
+  const value = await readCodexAccountUsage({
+    binary: "/fake/codex",
+    platform: "darwin",
+    timeoutMs: 2_000,
+    spawnImpl: () => fakeAppServer((message) => {
+      if (message.id === 1) return { id: 1, result: {} };
+      if (message.id === 2) {
+        return {
+          id: 2,
+          result: {
+            rateLimits: {
+              planType: "plus",
+              limitId: "codex",
+              primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+            },
+          },
+          exitAfter: true,
+        };
+      }
+      return undefined;
+    }),
+  });
+
+  assert.equal(value.planType, "plus");
+  assert.equal(value.primary.usedPercent, 40);
+  assert.deepEqual(value.dailyUsageBuckets, []);
+  assert.equal(value.summary.lifetimeTokens, null);
+});
+
+test("an app-server exit with no account replies still fails the probe", async () => {
+  await assert.rejects(readCodexAccountUsage({
+    binary: "/fake/codex",
+    platform: "darwin",
+    timeoutMs: 2_000,
+    spawnImpl: () => fakeAppServer(() => ({ exitAfter: true })),
+  }), /exited before replying \(1\)/);
+});
+
+test("replies still in the pipe when the app-server exits are not discarded", async () => {
+  const value = await readCodexAccountUsage({
+    binary: "/fake/codex",
+    platform: "darwin",
+    timeoutMs: 2_000,
+    spawnImpl: () => fakeAppServer((message) => {
+      if (message.id === 1) return { id: 1, result: {} };
+      if (message.id !== 3) return undefined;
+      // Both answers were written before the process ended, but `exit` is
+      // observed first. Settling on it rejected with "exited before replying".
+      return {
+        exitBeforeWrite: true,
+        lines: [
+          { id: 2, result: { rateLimits: { planType: "plus", primary: { usedPercent: 25 } } } },
+          { id: 3, result: { dailyUsageBuckets: [{ startDate: "2026-09-10", tokens: 11 }] } },
+        ],
+      };
+    }),
+  });
+
+  assert.equal(value.planType, "plus");
+  assert.equal(value.primary.usedPercent, 25);
+  assert.deepEqual(value.dailyUsageBuckets, [{ startDate: "2026-09-10", tokens: 11 }]);
 });
 
 test("a refused usage read still returns rate limits instead of failing the panel", async () => {

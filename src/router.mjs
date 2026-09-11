@@ -133,7 +133,7 @@ import {
   flattenNamespaceTools,
   flattenToolChoice,
   flattenToolSearchHistory,
-  recoverPreflattenedMcpTools,
+  restorePreflattenedToolNamespaces,
   repairToolSchemaRoots,
   strictOpenCodeCompactionInput,
   stripSearchContentTypes,
@@ -3126,6 +3126,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
   const deepSeekResponses = usesDeepSeekResponses(route);
   const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
+  // Restore declarations only where the existing adapter flattens tools again.
+  // Native Responses routes retain the client's original declaration shape and
+  // restore only their response lookup below.
+  const clientTools = chatCompletionsProvider || deepSeekResponses || consoleGoResponsesCompatibility
+    ? restorePreflattenedToolNamespaces(payload.tools, payload.client_metadata)
+    : payload.tools;
   const compatibleInput = zenFreeCompatibleInput(
     normalizeProviderAppToolOutputs(agedInput),
     route,
@@ -3135,7 +3141,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // must fail locally before that work starts; the normal post-bridge pass
   // below runs again so any later transformation cannot bypass the invariant.
   if (provider?.id === "groq" && chatCompletionsProvider) {
-    const preflight = chatProviderToolSurface(payload.tools, provider.id, {
+    const preflight = chatProviderToolSurface(clientTools, provider.id, {
       input: compatibleInput,
       toolChoice: payload.tool_choice,
     });
@@ -3201,7 +3207,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
       input.pop();
     }
   }
-  let tools = payload.tools;
+  let tools = clientTools;
   // LiteLLM's Responses -> Chat Completions bridge drops namespace tools, which
   // is how the client ships the collaboration runtime, the app toolset
   // (threads, automations, navigation), and every MCP server (node_repl,
@@ -3241,27 +3247,19 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     // is flattened and the list is left alone. The inventory is still built,
     // because the response transform reads the exact spawn_agent model enum off
     // it to drop an invented or stale optional override before Codex validates
-    // the call.
-    flattenedNamespaces = flattenNamespaceTools(tools, {
+    // the call. When Codex pre-flattened namespace tools, build that inventory
+    // from the restored declarations so a call returned under the flat wire
+    // name reaches Codex under the identity it dispatches by. The
+    // provider-facing list itself stays exactly as the client sent it.
+    const inventoryTools = restorePreflattenedToolNamespaces(tools, payload.client_metadata);
+    flattenedNamespaces = flattenNamespaceTools(inventoryTools, {
       bridgeToolSearch: false,
     }).namespaces;
+    namespacesFlattened = inventoryTools !== tools;
     // Keeping the namespace shape is not the same as keeping a parameter root
     // strict Responses providers may reject. Run the shared root repair on the
     // tools alone without flattening their native representation.
     tools = repairToolSchemaRoots(tools);
-  }
-  // Recent Codex clients flatten namespace tools before sending them to a
-  // custom Responses provider. Their canonical turn metadata is the only
-  // request-local source that can distinguish that MCP identity from an
-  // ordinary function whose literal name happens to contain `__`.
-  if (
-    recoverPreflattenedMcpTools(
-      tools,
-      payload.client_metadata,
-      flattenedNamespaces,
-    )
-  ) {
-    namespacesFlattened = true;
   }
   if (needsNonRecursiveToolSchemaCompatibility(route)) {
     // Run after namespace flattening so both native children and ordinary

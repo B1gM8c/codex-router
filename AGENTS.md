@@ -1944,6 +1944,17 @@ retry rules on the shared path.
   is not delivered. Flatten namespaces/deferred tools through the existing
   adapters; retain native top-level `apply_patch` and bridge other custom tools.
   Restore exact namespace/name identities, including plain-name collisions.
+- Codex can flatten native and MCP function/custom declarations before sending
+  them to a routed provider. Restore namespaces only for live, directly exposed
+  tools identified by the request's canonical turn metadata. Rewrite declarations
+  only on routes that flatten tools. Responses-native routes that skip
+  flattening send the client's declarations unchanged, but build their response
+  lookup from the restored inventory so a returned flat call still reaches Codex
+  under its `{namespace, name}` identity. Restore before app expansion and
+  normal flattening so client schemas, custom formats and collaboration model
+  constraints use the existing adapters. Never infer tools from name prefixes or
+  create declarations from metadata alone; ambiguous and ordinary-name
+  collisions remain unchanged.
 - GLM thinking, legacy DeepSeek thinking and Command Code's DeepSeek Flash Chat
   route carry reasoning through LiteLLM as assistant `thinking` parts, restored
   by the forwarder to `reasoning_content`. Remove only successfully carried

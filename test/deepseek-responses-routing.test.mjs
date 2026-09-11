@@ -211,7 +211,8 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
       response.writeHead(400, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { type: "invalid_request_error", message: "fixture rejection" } })); return;
     }
-    const name = mode === "tool" ? "fixture__probe" : mode === "custom" ? "apply_patch"
+    const name = mode === "registered-tool" ? body.tools.find((tool) => tool.description === "Registered client tool").name
+      : mode === "tool" ? "fixture__probe" : mode === "custom" ? "apply_patch"
       : mode === "unsupported-custom" ? "exec"
         : mode === "namespaced-custom" ? body.tools.find((tool) => tool.description === "Synthetic namespaced freeform tool.").name
           : undefined;
@@ -370,6 +371,40 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
       }
       assert.equal(events.filter((event) => event.type === "response.custom_tool_call_input.delta")
         .map((event) => event.delta).join(""), "synthetic raw input");
+    }
+    mode = "registered-tool";
+    for (const [namespace, name, source] of [
+      ["image_gen", "imagegen", { kind: "harness" }],
+      ["clock", "curr_time", { kind: "harness" }],
+      ["codex_app", "list_projects", { kind: "harness" }],
+      ["mcp__node_repl", "js", { kind: "mcp", server_name: "node_repl" }],
+    ]) {
+      const result = await send("Use the explicitly registered tool.", {
+        tools: [{ type: "function", name: `${namespace}__${name}`, description: "Registered client tool", parameters: { type: "object" } }],
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({
+            tool_namespaces_info: {
+              [namespace]: {
+                name: namespace,
+                functions: { [name]: { name, direct: true, source } },
+              },
+            },
+          }),
+        },
+      });
+      assert.equal(result.status, 200);
+      const events = parseEvents(await result.text());
+      assertTranscript(events);
+      assert.ok(events.some((event) =>
+        event.type === "response.output_item.done" && event.item.type === "function_call"));
+      for (const event of events) {
+        for (const item of event.item ? [event.item] : event.response?.output || []) {
+          if (item.type !== "function_call") continue;
+          assert.equal(item.namespace, namespace);
+          assert.equal(item.name, name);
+          if (item.status === "completed") assert.equal(item.arguments, '{"ok":true}');
+        }
+      }
     }
     mode = "normal";
     const compact = await fetch(`${base}/responses/compact`, {
