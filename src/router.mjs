@@ -81,8 +81,10 @@ import {
 import {
   MODEL_BY_SLUG,
   RUNTIME_PROVIDERS,
+  USER_MODELS_SKIPPED,
   providerForModel,
 } from "./model-registry.mjs";
+import { isProviderPrefixedSlug, unroutedModelError } from "./unrouted-model.mjs";
 import { createHealthCache } from "./health-cache.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
@@ -3797,6 +3799,27 @@ async function handleResponses(request, response, requestUrl) {
     let registeredRoute =
       MODEL_BY_SLUG.get(requestedModel) ??
       MODEL_BY_SLUG.get(readNativeAliases()[requestedModel]);
+    // A provider-prefixed slug with no route is a routed model this process
+    // never loaded -- added to user-models.json after startup, or skipped at
+    // load as invalid -- and never native GPT traffic: no native slug contains
+    // "/". Forwarding it earned ChatGPT's "not supported when using Codex with
+    // a ChatGPT account" refusal and sent the prompt to OpenAI (#689). Refuse
+    // it here, before the native redirect or the passthrough can take it.
+    if (!registeredRoute && isProviderPrefixedSlug(requestedModel)) {
+      const prefix = requestedModel.slice(0, requestedModel.indexOf("/"));
+      const provider = RUNTIME_PROVIDERS.get(prefix);
+      writeJson(response, 400, unroutedModelError(requestedModel, {
+        provider,
+        providerEnabled: Boolean(provider) && routeProviderEnabled(prefix),
+        skippedReason: USER_MODELS_SKIPPED.get(requestedModel),
+      }));
+      // Not gated on QUIET: this is a configuration fault the operator has to
+      // be able to find in the service log, not per-turn chatter.
+      console.error(
+        `[codex-router] refused unrouted model=${JSON.stringify(requestedModel.slice(0, 160))} status=400`,
+      );
+      return;
+    }
     // An unregistered model on this endpoint is native GPT traffic -- Codex's
     // background agent sessions arrive here hardwired to a native slug no
     // matter which model the user picked. With the redirect opted in, send
