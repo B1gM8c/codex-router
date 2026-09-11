@@ -752,23 +752,35 @@ try {
     const canceled = await held;
     assert.ok(cancelStreamClosed, "the canceled request must have reached the mock upstream");
     assert.equal(canceled?.name, "AbortError");
-    // On hosted macOS runners the disconnect sometimes fails to reach the mock
-    // within 10 s (4 of ~51 runs by 2026-09-12; Linux and Windows never). The
-    // lagging hop is unproven, so macOS waits longer and then warns instead of
-    // failing, and the remaining protocol checks in this run still execute.
-    const cancelStrict = process.platform !== "darwin";
-    const cancelCloseMs = cancelStrict ? 10_000 : 30_000;
+    // Check the replay invariant before waiting for the close. A late teardown
+    // must never pre-empt it: a cancelled turn that quietly issues a second
+    // upstream request is the costlier failure of the two.
+    assert.equal(capturedGrok.length, 4, "client cancellation must not trigger a replay");
+    // A client abort has to tear down the whole local path -- Router, LiteLLM,
+    // Grok forwarder, upstream -- because that is what stops the provider
+    // generating (and billing) once the user cancels. Hosted macOS runners have
+    // needed more than the original 10 s for the mock to see that close (4 of
+    // ~51 runs by 2026-09-12; Linux and Windows never). Waiting longer keeps the
+    // guarantee on every platform instead of trading it away for quiet CI: the
+    // extra budget costs time only when teardown is late, and a close that never
+    // arrives still fails the run. Runs slower than the old budget report the
+    // measured time, so the lagging hop can be diagnosed from CI output.
+    const CANCEL_CLOSE_BUDGET_MS = 60_000;
+    const CANCEL_CLOSE_EXPECTED_MS = 10_000;
+    const cancelCloseStarted = Date.now();
     let closeTimer;
     const cancelClosed = await Promise.race([
       cancelStreamClosed.then(() => true),
-      new Promise((resolve) => { closeTimer = setTimeout(() => resolve(false), cancelCloseMs); }),
+      new Promise((resolve) => { closeTimer = setTimeout(() => resolve(false), CANCEL_CLOSE_BUDGET_MS); }),
     ]).finally(() => clearTimeout(closeTimer));
+    const cancelCloseMs = Date.now() - cancelCloseStarted;
     if (!cancelClosed) {
-      if (cancelStrict) throw new Error("cancellation did not reach mock upstream");
-      process.stdout.write(`::warning title=Grok cancellation::cancellation did not reach mock upstream within ${cancelCloseMs} ms on macOS\n`);
+      throw new Error(`cancellation did not reach mock upstream within ${CANCEL_CLOSE_BUDGET_MS} ms on ${process.platform}`);
     }
-    assert.equal(capturedGrok.length, 4, "client cancellation must not trigger a replay");
-    process.stdout.write(`ok semantic errors ${nativeHook ? "reach the client hook" : "fail closed"} without a hidden request; client cancellation ${cancelClosed ? "closes the complete local upstream path" : "did not replay (upstream close unconfirmed)"}\n`);
+    if (cancelCloseMs > CANCEL_CLOSE_EXPECTED_MS) {
+      process.stdout.write(`::warning title=Grok cancellation::upstream close took ${cancelCloseMs} ms on ${process.platform}, over the ${CANCEL_CLOSE_EXPECTED_MS} ms this path used to need\n`);
+    }
+    process.stdout.write(`ok semantic errors ${nativeHook ? "reach the client hook" : "fail closed"} without a hidden request; client cancellation closes the complete local upstream path in ${cancelCloseMs} ms\n`);
   }
   if (nativeHook) {
     // Preserve original argument bytes, including whitespace, duplicate keys and
