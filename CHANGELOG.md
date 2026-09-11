@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Routed models' turns now render like native ones in Codex.** Native models
+  label each assistant message `commentary` (a progress note before more tool
+  calls) or `final_answer`, and Codex folds commentary into "Worked for ..."
+  and shows the final answer below it. Routed providers never send the label,
+  so every progress note rendered as a standalone answer. The router now labels
+  routed messages from the stream's item order: a message another item follows
+  is commentary, and the last message of a completed response is the final
+  answer. A phase the provider sent always wins, text still streams live, and
+  failed or unterminated responses are relayed unlabelled. The label costs no
+  model tokens, and LiteLLM drops it from history before any chat-completions
+  provider sees it.
 - **`apply_patch` calls no longer abort routed turns mid-stream when a model
   skips LiteLLM's wrapper.** LiteLLM sends native custom tools such as
   `apply_patch` to Chat Completions providers as a function with one `content`
