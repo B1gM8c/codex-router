@@ -14,7 +14,7 @@ import {
   flattenNamespaceTools,
   flattenToolChoice,
   flattenToolSearchHistory,
-  recoverPreflattenedMcpTools,
+  restorePreflattenedToolNamespaces,
   rewriteNamespaceFunctionCall,
   rewriteNamespaceResponsePayload,
   repairToolSchemaRoots,
@@ -173,252 +173,150 @@ test("flattenNamespaceTools flattens every namespace, including MCP ones", () =>
   assert.deepEqual([...namespaces.get("mcp__codex_apps__github")], ["fetch_issue"]);
 });
 
-test("turn metadata recovers a namespace Codex flattened before the router", () => {
-  const wireName = "mcp__neon__apm__staging__snapshot__ro__get_monitor_snapshot";
-  const tools = [{ type: "function", name: wireName, parameters: { type: "object" } }];
-  const { namespaces } = flattenNamespaceTools(tools);
-  const clientMetadata = {
-    "x-codex-turn-metadata": JSON.stringify({
-      tool_namespaces_info: {
-        "mcp__neon__apm__staging__snapshot__ro": {
-          name: "mcp__neon__apm__staging__snapshot__ro",
-          functions: {
-            get_monitor_snapshot: {
-              name: "get_monitor_snapshot",
-              direct: true,
-              code_mode_name: null,
-              deferred: false,
-              source: { kind: "mcp", server_name: "neon__apm__staging__snapshot__ro" },
-            },
-          },
-        },
-      },
-    }),
-  };
+function turnToolMetadata(namespace, names, source = { kind: "harness" }) {
+  return { "x-codex-turn-metadata": JSON.stringify({ tool_namespaces_info: {
+    [namespace]: { name: namespace, functions: Object.fromEntries(names.map((name) =>
+      [name, { name, direct: true, source }])) },
+  } }) };
+}
 
-  assert.equal(
-    recoverPreflattenedMcpTools(tools, clientMetadata, namespaces),
-    true,
-  );
-  assert.deepEqual(
-    rewriteNamespaceResponsePayload(
-      {
-        output: [{
-          type: "function_call",
-          name: wireName,
-          call_id: "call_snapshot",
-          arguments: "{}",
-        }],
-      },
-      buildNamespaceLookups(namespaces),
-    ).output[0],
-    {
-      type: "function_call",
-      name: "get_monitor_snapshot",
-      namespace: "mcp__neon__apm__staging__snapshot__ro",
-      call_id: "call_snapshot",
-      arguments: "{}",
-    },
-  );
+test("turn metadata restores directly registered harness and MCP namespaces", () => {
+  for (const [namespace, name, source] of [
+    ["image_gen", "imagegen", { kind: "harness" }],
+    ["clock", "sleep", { kind: "harness" }],
+    ["browser", "open", { kind: "harness" }],
+    ["codex_app", "list_projects", { kind: "harness" }],
+    ["mcp__neon__apm__staging__snapshot__ro", "get_monitor_snapshot",
+      { kind: "mcp", server_name: "neon__apm__staging__snapshot__ro" }],
+  ]) {
+    const wireName = `${namespace}__${name}`;
+    const definition = { type: "function", name: wireName, description: "Client-owned tool.",
+      parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] } };
+    const tools = [definition];
+    const original = structuredClone(tools);
+    const restored = restorePreflattenedToolNamespaces(tools, turnToolMetadata(namespace, [name], source));
+    assert.deepEqual(restored, [{ type: "namespace", name: namespace, tools: [{ ...definition, name }] }]);
+    assert.deepEqual(tools, original, "reconstruction must not mutate the client's definitions");
+    const { namespaces } = flattenNamespaceTools(restored);
+    const call = { type: "function_call", name: wireName, call_id: "call_native", arguments: '{"prompt":"fixture"}' };
+    assert.deepEqual(rewriteNamespaceResponsePayload({ output: [call] }, buildNamespaceLookups(namespaces)).output[0],
+      { ...call, namespace, name });
+  }
 });
 
-test("pre-flattened recovery does not reinterpret an ordinary function collision", () => {
+test("pre-flattened recovery requires unambiguous live direct definitions", () => {
+  const namespace = "image_gen";
+  const name = "imagegen";
+  const wireName = `${namespace}__${name}`;
+  const tools = [{ type: "function", name: wireName }];
+  const registered = JSON.parse(turnToolMetadata(namespace, [name])["x-codex-turn-metadata"]).tool_namespaces_info;
+  const notDirect = structuredClone(registered);
+  notDirect[namespace].functions[name].direct = false;
+  const wrongSource = structuredClone(registered);
+  wrongSource[namespace].functions[name].source = { kind: "mcp", server_name: namespace };
+  const ordinaryCollision = { ...registered,
+    functions: { name: "functions", functions: { [wireName]: { name: wireName } } } };
+  for (const inventory of [{}, notDirect, wrongSource, ordinaryCollision]) {
+    assert.equal(restorePreflattenedToolNamespaces(tools, {
+      "x-codex-turn-metadata": JSON.stringify({ tool_namespaces_info: inventory }),
+    }), tools);
+  }
+  const absent = [];
+  assert.equal(restorePreflattenedToolNamespaces(absent, turnToolMetadata(namespace, [name])), absent,
+    "metadata must not invent unadvertised tools");
+  assert.equal(restorePreflattenedToolNamespaces(tools, {}), tools);
+  const ordinary = [{ type: "function", name: "exec_command" }];
+  assert.equal(restorePreflattenedToolNamespaces(ordinary, turnToolMetadata("functions", ["exec_command"])), ordinary);
+  const explicit = [...tools, { type: "namespace", name: namespace, tools: [{ type: "function", name }] }];
+  assert.equal(restorePreflattenedToolNamespaces(explicit, turnToolMetadata(namespace, [name])), explicit,
+    "an existing native identity must not absorb a conflicting flat declaration");
+});
+
+test("pre-flattened recovery does not reinterpret an ordinary MCP function collision", () => {
   const wireName = "mcp__calendar__create_event";
   const tools = [{ type: "function", name: wireName }];
-  const { namespaces } = flattenNamespaceTools(tools);
-  const clientMetadata = {
-    "x-codex-turn-metadata": JSON.stringify({
-      tool_namespaces_info: {
-        functions: {
-          name: "functions",
-          functions: {
-            [wireName]: {
-              name: wireName,
-              direct: true,
-              source: { kind: "harness" },
-            },
-          },
-        },
-        mcp__calendar: {
-          name: "mcp__calendar",
-          functions: {
-            create_event: {
-              name: "create_event",
-              direct: true,
-              source: { kind: "mcp", server_name: "calendar" },
-            },
-          },
-        },
-      },
-    }),
+  const metadata = JSON.parse(turnToolMetadata("mcp__calendar", ["create_event"],
+    { kind: "mcp", server_name: "calendar" })["x-codex-turn-metadata"]);
+  metadata.tool_namespaces_info.functions = {
+    name: "functions", functions: { [wireName]: { name: wireName, direct: true, source: { kind: "harness" } } },
   };
-
-  assert.equal(
-    recoverPreflattenedMcpTools(tools, clientMetadata, namespaces),
-    false,
-  );
-  assert.equal(namespaces.size, 0);
+  assert.equal(restorePreflattenedToolNamespaces(tools, {
+    "x-codex-turn-metadata": JSON.stringify(metadata),
+  }), tools);
 });
 
 test("pre-flattened recovery fails closed on ambiguous delimiter ownership", () => {
   const tools = [{ type: "function", name: "mcp__calendar__admin__create" }];
-  const { namespaces } = flattenNamespaceTools(tools);
-  const clientMetadata = {
-    "x-codex-turn-metadata": JSON.stringify({
-      tool_namespaces_info: {
-        mcp__calendar: {
-          name: "mcp__calendar",
-          functions: {
-            admin__create: {
-              name: "admin__create",
-              direct: true,
-              source: { kind: "mcp", server_name: "calendar" },
-            },
-          },
-        },
-        mcp__calendar__admin: {
-          name: "mcp__calendar__admin",
-          functions: {
-            create: {
-              name: "create",
-              direct: true,
-              source: { kind: "mcp", server_name: "calendar__admin" },
-            },
-          },
-        },
-      },
-    }),
-  };
-
-  assert.equal(
-    recoverPreflattenedMcpTools(tools, clientMetadata, namespaces),
-    false,
-  );
-  assert.equal(namespaces.size, 0);
+  const inventory = {};
+  for (const [server, name] of [["calendar", "admin__create"], ["calendar__admin", "create"]]) {
+    Object.assign(inventory, JSON.parse(turnToolMetadata(`mcp__${server}`, [name],
+      { kind: "mcp", server_name: server })["x-codex-turn-metadata"]).tool_namespaces_info);
+  }
+  assert.equal(restorePreflattenedToolNamespaces(tools, {
+    "x-codex-turn-metadata": JSON.stringify({ tool_namespaces_info: inventory }),
+  }), tools);
 });
 
-test("pre-flattened recovery transfers a bounded provider alias to the MCP identity", () => {
-  const serverName = "neon__apm__production__snapshot__read_only";
-  const namespace = `mcp__${serverName}`;
-  const name = "get_monitor_snapshot_with_complete_context";
-  const wireName = `${namespace}__${name}`;
-  const flattened = flattenNamespaceTools(
-    [{ type: "function", name: wireName, parameters: { type: "object" } }],
-    { maxNameLength: 64 },
-  );
-  const providerName = flattened.tools[0].name;
-  assert.notEqual(providerName, wireName);
-  assert.ok(providerName.length <= 64);
-
-  assert.equal(
-    recoverPreflattenedMcpTools(
-      flattened.tools,
-      {
-        "x-codex-turn-metadata": JSON.stringify({
-          tool_namespaces_info: {
-            [namespace]: {
-              name: namespace,
-              functions: {
-                [name]: {
-                  name,
-                  direct: true,
-                  source: { kind: "mcp", server_name: serverName },
-                },
-              },
-            },
-          },
-        }),
-      },
-      flattened.namespaces,
-    ),
-    true,
-  );
-  assert.equal(
-    flattenNamespacedHistory(
-      [{ type: "function_call", namespace, name, call_id: "call_history", arguments: "{}" }],
-      flattened.namespaces,
-    )[0].name,
-    providerName,
-  );
-  assert.deepEqual(
-    rewriteNamespaceResponsePayload(
-      {
-        output: [{
-          type: "function_call",
-          name: providerName,
-          call_id: "call_live",
-          arguments: "{}",
-        }],
-      },
-      buildNamespaceLookups(flattened.namespaces),
-    ).output[0],
-    {
-      type: "function_call",
-      namespace,
-      name,
-      call_id: "call_live",
-      arguments: "{}",
-    },
-  );
+test("restored MCP identities retain bounded and collision-only provider aliases", () => {
+  for (const [serverName, name, options] of [
+    ["neon__apm__production__snapshot__read_only", "get_monitor_snapshot_with_complete_context", { maxNameLength: 64 }],
+    ["calendar", "create_event", { aliasCollisions: true }],
+  ]) {
+    const namespace = `mcp__${serverName}`;
+    const wireName = `${namespace}__${name}`;
+    const tools = [{ type: "function", name: wireName, parameters: { type: "object" } }];
+    const restored = restorePreflattenedToolNamespaces(tools,
+      turnToolMetadata(namespace, [name], { kind: "mcp", server_name: serverName }));
+    const flattened = flattenNamespaceTools(restored, options);
+    const providerName = flattened.tools[0].name;
+    if (options.maxNameLength) {
+      assert.notEqual(providerName, wireName);
+      assert.ok(providerName.length <= 64);
+    } else assert.equal(providerName, wireName);
+    const call = { type: "function_call", namespace, name, call_id: "call_history", arguments: "{}" };
+    assert.equal(flattenNamespacedHistory([call], flattened.namespaces)[0].name, providerName);
+    const { namespace: _namespace, ...providerCall } = call;
+    assert.deepEqual(rewriteNamespaceResponsePayload({ output: [{ ...providerCall, name: providerName }] },
+      buildNamespaceLookups(flattened.namespaces)).output[0], call);
+  }
 });
 
-test("pre-flattened recovery transfers collision-only alias ownership", () => {
-  const namespace = "mcp__calendar";
-  const name = "create_event";
-  const wireName = `${namespace}__${name}`;
-  const flattened = flattenNamespaceTools(
-    [{ type: "function", name: wireName }],
-    { aliasCollisions: true },
-  );
-  assert.equal(flattened.tools[0].name, wireName);
-  assert.equal(
-    recoverPreflattenedMcpTools(
-      flattened.tools,
-      {
-        "x-codex-turn-metadata": JSON.stringify({
-          tool_namespaces_info: {
-            [namespace]: {
-              name: namespace,
-              functions: {
-                [name]: {
-                  name,
-                  direct: true,
-                  source: { kind: "mcp", server_name: "calendar" },
-                },
-              },
-            },
-          },
-        }),
-      },
-      flattened.namespaces,
-    ),
-    true,
-  );
-  assert.equal(
-    flattenNamespacedHistory(
-      [{ type: "function_call", namespace, name, call_id: "call_history", arguments: "{}" }],
-      flattened.namespaces,
-    )[0].name,
-    wireName,
-  );
-  const restored = rewriteNamespaceResponsePayload(
-    {
-      output: [{
-        type: "function_call",
-        name: wireName,
-        call_id: "call_live",
-        arguments: "{}",
-      }],
-    },
-    buildNamespaceLookups(flattened.namespaces),
-  ).output[0];
-  assert.deepEqual(
-    { namespace: restored.namespace, name: restored.name },
-    { namespace, name },
-  );
+test("restored app tools group once and preserve client schemas before expansion", () => {
+  const definitions = ["list_projects", "create_thread"].map((name) => ({
+    type: "function", name: `codex_app__${name}`, description: `Current ${name} contract`,
+    parameters: { type: "object", properties: { clientOnly: { type: "string" } }, required: ["clientOnly"] },
+  }));
+  const restored = restorePreflattenedToolNamespaces(definitions,
+    turnToolMetadata("codex_app", ["list_projects", "create_thread"]));
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].tools.length, 2);
+  const expanded = mergeCodexAppTools(restored).tools;
+  const app = expanded.filter((tool) => tool.type === "namespace" && tool.name === "codex_app");
+  assert.equal(app.length, 1);
+  assert.equal(new Set(app[0].tools.map((tool) => tool.name)).size, app[0].tools.length);
+  for (const definition of definitions) {
+    const name = definition.name.slice("codex_app__".length);
+    assert.deepEqual(app[0].tools.find((tool) => tool.name === name), { ...definition, name });
+  }
 });
 
-test("pre-flattened recovery rejects malformed, duplicated, and non-MCP metadata", () => {
+test("restored collaboration tools derive spawn model validation from parameters", () => {
+  const definition = { type: "function", name: "collaboration__spawn_agent", parameters: {
+    type: "object", properties: { model: { type: "string", enum: ["deepseek/deepseek-flash"] }, message: { type: "string" } },
+  } };
+  const restored = restorePreflattenedToolNamespaces([definition], turnToolMetadata("collaboration", ["spawn_agent"]));
+  const { namespaces } = flattenNamespaceTools(restored);
+  const lookups = buildNamespaceLookups(namespaces);
+  for (const model of ["deepseek/deepseek-flash", "unavailable-model"]) {
+    const call = { type: "function_call", name: definition.name, arguments: JSON.stringify({ model, message: "bounded task" }) };
+    const output = rewriteNamespaceResponsePayload({ output: [call] }, lookups).output[0];
+    assert.equal(output.namespace, "collaboration");
+    assert.equal(output.name, "spawn_agent");
+    assert.deepEqual(JSON.parse(output.arguments), model === "unavailable-model" ? { message: "bounded task" } : { model, message: "bounded task" });
+  }
+});
+
+test("pre-flattened recovery rejects malformed, duplicated, and mismatched-source metadata", () => {
   const namespace = "mcp__calendar";
   const name = "create_event";
   const wireName = `${namespace}__${name}`;
@@ -476,16 +374,11 @@ test("pre-flattened recovery rejects malformed, duplicated, and non-MCP metadata
 
   for (const encoded of cases) {
     const toolName = encoded.includes("codex_app") ? "codex_app__create_thread" : wireName;
-    const { namespaces } = flattenNamespaceTools([{ type: "function", name: toolName }]);
+    const tools = [{ type: "function", name: toolName }];
     assert.equal(
-      recoverPreflattenedMcpTools(
-        [{ type: "function", name: toolName }],
-        { "x-codex-turn-metadata": encoded },
-        namespaces,
-      ),
-      false,
+      restorePreflattenedToolNamespaces(tools, { "x-codex-turn-metadata": encoded }),
+      tools,
     );
-    assert.equal(namespaces.size, 0);
   }
 });
 

@@ -772,15 +772,17 @@ test("post-release parsing is bounded for an unterminated event", async () => {
     "",
   ].join("\n");
   const guard = new EmptyCompletionGuard("text/event-stream", {
-    maxPreludeBytes: 64,
+    maxPreludeBytes: 1024 * 1024, // 1MB pre-release limit
     maxPreludeMs: 1_000,
   });
   const chunks = [];
+  // Post-release limit is 10MB, so send >10MB in an unterminated event
+  const hugeUnterminated = `event: response.in_progress\ndata: ${"x".repeat(11 * 1024 * 1024)}`;
   await assert.rejects(
     pipeline(
       Readable.from([
         Buffer.from(reasoning),
-        Buffer.from(`event: response.in_progress\ndata: ${"x".repeat(128)}`),
+        Buffer.from(hugeUnterminated),
       ]),
       guard,
       new Writable({

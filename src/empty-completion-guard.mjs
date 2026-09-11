@@ -5,6 +5,10 @@ import { HeaderlessSseDetector } from "./sse-prefix.mjs";
 
 const MAX_PRECONTENT_BYTES = 1024 * 1024;
 const MAX_PRECONTENT_MS = 30_000;
+// After liveness is established, allow much larger incomplete SSE blocks to
+// accommodate legitimate large reasoning deltas (issue #684), while still
+// protecting against unbounded/malformed streams.
+const MAX_POST_LIVENESS_INCOMPLETE_BYTES = 10 * 1024 * 1024; // 10MB
 
 export class EmptyCompletionPreludeLimitError extends Error {
   constructor(kind) {
@@ -488,12 +492,15 @@ export class EmptyCompletionGuard extends Transform {
       // A liveness or time-limit release ends the hold, not the question. Keep
       // parsing from behind the relay so a turn that later produces nothing is
       // still recognized — it just gets reported instead of retried.
+      // After release, use a much higher limit for incomplete SSE blocks to allow
+      // legitimate large reasoning deltas (issue #684) while still protecting
+      // against unbounded/malformed streams.
       if (!this.#settled()) {
         this.#parseBuffer += this.#decoder.write(bytes);
         this.#consumeBlocks();
         if (
           !this.#settled() &&
-          Buffer.byteLength(this.#parseBuffer) > this.#maxPreludeBytes
+          Buffer.byteLength(this.#parseBuffer) > MAX_POST_LIVENESS_INCOMPLETE_BYTES
         ) {
           this.#failPrelude("bytes");
         }
