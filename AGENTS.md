@@ -725,6 +725,16 @@ and every client saw a bare "Connection error" naming nothing.
    contract. Keep the streamed-input fingerprint check and fail closed when the
    delta, terminal arguments, or output-item close disagree. The focused
    namespace-relay test and Z.ai router fixture hold both sides of this boundary.
+   The wrapper is a request, not a guarantee: models put `content` after another
+   key, answer `{ "input": ... }` or `{}`, or send raw patch text, and LiteLLM
+   relays those rather than rejecting them. For a native custom call the relay
+   therefore derives the input exactly as LiteLLM's
+   `unwrap_custom_tool_arguments` does -- a string `content` from a JSON
+   object, otherwise the arguments verbatim -- and never a stricter reading;
+   rejecting a shape LiteLLM accepted aborts a committed stream and Codex
+   retries the identical turn until it fails. A present non-string `content`
+   stays unsupported, and the delta check is skipped only when the decoder
+   emitted no input text for the client to contradict.
 11. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
    security floor and a wheel-availability decision (see the lock section
    above), any change to it has to be proven by booting the proxy rather than by
