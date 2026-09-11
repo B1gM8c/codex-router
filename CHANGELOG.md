@@ -2,14 +2,31 @@
 
 ## Unreleased
 
-- **Grok compaction keeps the Grok transport bounds, and a failed Grok turn
-  stays a failure when the client leaves.** A Grok OAuth compaction now uses
-  the same long-idle router pool and gateway `timeout` as a streamed turn, so a
-  long summary is no longer cut off by the 300-second Undici or 600-second
-  gateway defaults. A Grok turn that already delivered a terminal error is
-  metered and reported in `/activity` as a failure even if the client then
-  closes the still-open stream, which the WebSocket edge does five seconds
-  after a failure; it used to read as a user cancellation.
+- **Tok/s counts reasoning tokens exactly when they were generated inside the
+  timed window.** The Sep 5 change subtracted `reasoning_tokens` from the
+  numerator on every route, but the first-token clock already started on the
+  first reasoning delta, so on the OpenAI, Grok, and Command Code routes the
+  reasoning time stayed in the denominator while its tokens left the
+  numerator. A fit of generation time against visible and reasoning tokens
+  over the local usage log put the cost of a reasoning token at roughly the
+  cost of a visible one on those routes (gpt-5.6-sol 21 vs 25 ms, grok-4.6 18
+  vs 16 ms), proving the thinking ran inside the window; the meter read
+  gpt-5.6-luna at 21 tok/s against about 80 measured, and grok-4.5 at 16
+  against about 67. Only Muse Spark on the OpenCode Responses route thinks in
+  silence before its first token (0.02 ms per reasoning token in the same
+  fit), which is the route the subtraction had been measured on. The stream
+  transform now records `reasoningStreamed` -- whether any reasoning delta
+  (Responses summary or text deltas, chat `reasoning_content` / `reasoning`)
+  was relayed -- and reasoning deltas and chat tool-call deltas start the
+  first-token clock like visible text does. `aggregateProviderUsage` and the
+  Control Center per-event rate keep reasoning tokens when the marker is true
+  or absent (rows written before it existed), and subtract them only when it
+  is false. A reasoning count larger than the output count proves a provider
+  reports visible tokens only (Command Code's DeepSeek V4 Pro: 62 of 146 rows,
+  e.g. 150 output against 499 reasoning), so the inclusive total is rebuilt
+  first instead of clamping the sample to zero and silently dropping it.
+  Provider totals and billing are unchanged.
+
 - **Preserve tool calls after large fragmented response preludes.** Allow one
   unfinished initial event within the existing 10 MiB bound and match the
   namespace relay's limit, so later MCP calls retain their client identities.
@@ -45,6 +62,14 @@
 - **Grok gateway stream errors reach Codex as terminal failures.** Untyped
   gateway errors are normalized without exposing upstream diagnostics or
   appending empty message closes, and request activity records the failure.
+- **Grok compaction keeps the Grok transport bounds, and a failed Grok turn
+  stays a failure when the client leaves.** A Grok OAuth compaction now uses
+  the same long-idle router pool and gateway `timeout` as a streamed turn, so a
+  long summary is no longer cut off by the 300-second Undici or 600-second
+  gateway defaults. A Grok turn that already delivered a terminal error is
+  metered and reported in `/activity` as a failure even if the client then
+  closes the still-open stream, which the WebSocket edge does five seconds
+  after a failure; it used to read as a user cancellation.
 - **Grok OAuth streams survive long reasoning pauses end to end.** After the
   prologue is released, a Grok OAuth turn uses a ten-minute stall bound
   (`CODEX_ROUTER_GROK_STREAM_STALL_MS`, positive milliseconds; invalid or

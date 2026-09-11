@@ -332,6 +332,10 @@ export function substituteZeroInputUsage(payload, estimate) {
 
 const LINE_FEED = 0x0a;
 
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
 export class ResponseUsageTransform extends Transform {
   #eventStream;
   #decoder = new StringDecoder("utf8");
@@ -352,6 +356,12 @@ export class ResponseUsageTransform extends Transform {
   // first token appears, and counting that silence as generation is what makes
   // a fast model read as slow. See #192.
   #firstTokenAt;
+  // Whether the stream carried reasoning deltas (summary or raw text). When it
+  // did, the reasoning tokens were generated after the first token and belong
+  // in the tokens-per-second numerator; when it did not, the provider thought
+  // in silence before the first visible token and those tokens belong to
+  // time-to-first-token instead. The aggregator picks the numerator from this.
+  #reasoningStreamed = false;
   #onEvent;
   #grokServiceTier;
   #completedResponseObserved = false;
@@ -571,34 +581,44 @@ export class ResponseUsageTransform extends Transform {
     }
   }
 
-  // The first event that carries visible generated text. Reasoning summaries
-  // and tool-call argument deltas are output the model is producing, so they
-  // count too -- what must not count is the wait before any of it starts.
+  // The first event that carries generated output of any kind. Reasoning
+  // deltas, visible text, and tool-call arguments all count -- what must not
+  // count is the wait before any of it starts. Reasoning is also remembered on
+  // its own, at any point in the stream, because the tokens-per-second
+  // numerator has to include reasoning exactly when its generation time sits
+  // inside the measured window (see aggregateProviderUsage).
   #noteFirstToken(payload) {
-    if (this.#firstTokenAt !== undefined) return;
-    // Chat-completions bridges stream choices[].delta instead of typed events.
-    // Check this first because chat.completion.chunk often has no `type` field.
+    // Chat-completions bridges stream choices[].delta instead of typed events;
+    // chat.completion.chunk often has no `type` field, so check the delta
+    // shape independently of the type.
     const chatDelta = payload?.choices?.[0]?.delta;
-    const chatProducesOutput =
-      typeof chatDelta?.content === "string" && chatDelta.content.length > 0;
-    if (chatProducesOutput) {
-      this.#firstTokenAt = Date.now();
-      return;
-    }
-    const type = payload?.type;
-    if (typeof type !== "string") return;
-    const producesOutput =
-      type === "response.output_text.delta" ||
+    const type = typeof payload?.type === "string" ? payload.type : undefined;
+    const reasoningDelta =
+      nonEmptyString(chatDelta?.reasoning_content) ||
+      nonEmptyString(chatDelta?.reasoning) ||
       type === "response.reasoning_summary_text.delta" ||
+      type === "response.reasoning_text.delta";
+    if (reasoningDelta) this.#reasoningStreamed = true;
+    if (this.#firstTokenAt !== undefined) return;
+    const visibleDelta =
+      nonEmptyString(chatDelta?.content) ||
+      (Array.isArray(chatDelta?.tool_calls) && chatDelta.tool_calls.length > 0) ||
+      type === "response.output_text.delta" ||
       type === "response.function_call_arguments.delta" ||
       type === "response.audio_transcript.delta";
-    if (producesOutput) this.#firstTokenAt = Date.now();
+    if (reasoningDelta || visibleDelta) this.#firstTokenAt = Date.now();
   }
 
   // Epoch milliseconds of the first generated token, or undefined when the
   // response never streamed one (a non-streaming reply, or an error).
   firstTokenAt() {
     return this.#firstTokenAt;
+  }
+
+  // True when at least one reasoning delta was relayed, so the reasoning
+  // tokens in the final usage were generated inside the timed window.
+  reasoningStreamed() {
+    return this.#reasoningStreamed;
   }
 
   completedResponseObserved() {

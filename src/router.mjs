@@ -3128,8 +3128,9 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
   const deepSeekResponses = usesDeepSeekResponses(route);
   const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
-  // Restore only where the existing adapter flattens tools again. Native
-  // Responses routes retain the client's original declaration shape.
+  // Restore declarations only where the existing adapter flattens tools again.
+  // Native Responses routes retain the client's original declaration shape and
+  // restore only their response lookup below.
   const clientTools = chatCompletionsProvider || deepSeekResponses || consoleGoResponsesCompatibility
     ? restorePreflattenedToolNamespaces(payload.tools, payload.client_metadata)
     : payload.tools;
@@ -3248,10 +3249,15 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     // is flattened and the list is left alone. The inventory is still built,
     // because the response transform reads the exact spawn_agent model enum off
     // it to drop an invented or stale optional override before Codex validates
-    // the call.
-    flattenedNamespaces = flattenNamespaceTools(tools, {
+    // the call. When Codex pre-flattened namespace tools, build that inventory
+    // from the restored declarations so a call returned under the flat wire
+    // name reaches Codex under the identity it dispatches by. The
+    // provider-facing list itself stays exactly as the client sent it.
+    const inventoryTools = restorePreflattenedToolNamespaces(tools, payload.client_metadata);
+    flattenedNamespaces = flattenNamespaceTools(inventoryTools, {
       bridgeToolSearch: false,
     }).namespaces;
+    namespacesFlattened = inventoryTools !== tools;
     // Keeping the namespace shape is not the same as keeping a parameter root
     // strict Responses providers may reject. Run the shared root repair on the
     // tools alone without flattening their native representation.
@@ -3726,6 +3732,7 @@ async function handleResponses(request, response, requestUrl) {
   let upstreamStatus;
   let upstreamLatencyMs;
   let firstTokenMs;
+  let reasoningStreamed;
   let usageTransform;
   let emptyCompletionGuard;
   let retryUsageTransform;
@@ -4222,6 +4229,7 @@ async function handleResponses(request, response, requestUrl) {
         durationMs: Date.now() - startedAt,
         responseStartMs: upstreamLatencyMs,
         firstTokenMs,
+        reasoningStreamed,
       }, diagnostics);
       observeSubagentOutcome(request, route, upstream.status);
       finalStatus = translatedStatus;
@@ -4389,6 +4397,7 @@ async function handleResponses(request, response, requestUrl) {
     // silent thinking that would otherwise be charged to the generation rate.
     const firstTokenAt = usageTransform?.firstTokenAt?.();
     if (firstTokenAt !== undefined) firstTokenMs = firstTokenAt - startedAt;
+    reasoningStreamed = usageTransform?.reasoningStreamed?.();
     estimatedInputTokens = usageTransform?.substitutedInputTokens();
     // The `close` listener above sets `clientGone` when the client's socket
     // goes away, but `pipeResponse` can resolve before that event fires: the
@@ -4639,6 +4648,7 @@ async function handleResponses(request, response, requestUrl) {
       durationMs: Date.now() - startedAt,
       responseStartMs: upstreamLatencyMs,
       firstTokenMs,
+      reasoningStreamed,
       ...usage,
       estimatedInputTokens,
       ...toolResultAging,
@@ -4782,6 +4792,7 @@ async function handleResponses(request, response, requestUrl) {
       );
       const firstTokenAt = usageTransform.firstTokenAt?.();
       if (firstTokenAt !== undefined) firstTokenMs = firstTokenAt - startedAt;
+      reasoningStreamed = usageTransform.reasoningStreamed?.();
     }
     // Codex may close a native stream immediately after response.completed.
     // That is a successful terminal turn, not a canceled generation.
@@ -4796,6 +4807,7 @@ async function handleResponses(request, response, requestUrl) {
           durationMs: Date.now() - startedAt,
           responseStartMs: upstreamLatencyMs,
           firstTokenMs,
+          reasoningStreamed,
           ...usage,
           estimatedInputTokens,
           ...toolResultAging,
@@ -4829,6 +4841,7 @@ async function handleResponses(request, response, requestUrl) {
           durationMs: Date.now() - startedAt,
           responseStartMs: upstreamLatencyMs,
         firstTokenMs,
+        reasoningStreamed,
           retries: upstreamRetries,
           ...usage,
           estimatedInputTokens,
@@ -4854,6 +4867,7 @@ async function handleResponses(request, response, requestUrl) {
         durationMs: Date.now() - startedAt,
         responseStartMs: upstreamLatencyMs,
         firstTokenMs,
+        reasoningStreamed,
         retries: upstreamRetries,
         ...usage,
         estimatedInputTokens,
