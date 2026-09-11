@@ -20,7 +20,6 @@ const ROUTES = [
   ["opencode-go/glm-5.3-flash", "glm-5.3-flash", "ox-alpha"],
   ["ollama-cloud/glm-5.3-flash", "glm-5.3-flash:cloud", "ollama-cloud-glm-5-3-flash"],
   ["openrouter/glm-5.3-flash", "z-ai/glm-5.3-flash", "ox-alpha"],
-  ["nousresearch/glm-5.3-flash", "z-ai/glm-5.3-flash", "ox-alpha"],
   ["zai-api/glm-5.3-flash", "glm-5.3-flash", "glm-thinking"],
   ["zai-coding/glm-5.3-flash", "glm-5.3-flash", "glm-thinking"],
 ];
@@ -33,11 +32,8 @@ test("every checked-in GLM-5.3-Flash route records its static metadata", () => {
     assert.equal(model.listed, true);
     assert.deepEqual(model.reasoningLevels.map((level) => level.effort), ["low", "high", "max"]);
     assert.equal(model.defaultEffort, "max");
-    // Nous uses 1.048M context with 943K autoCompact; others use 1M/400K
-    const expectedContext = slug === "nousresearch/glm-5.3-flash" ? 1_048_576 : 1_000_000;
-    const expectedCompact = slug === "nousresearch/glm-5.3-flash" ? 943_000 : 400_000;
-    assert.equal(model.contextWindow, expectedContext);
-    assert.equal(model.autoCompact, expectedCompact);
+    assert.equal(model.contextWindow, 1_000_000);
+    assert.equal(model.autoCompact, 400_000);
     assert.deepEqual(
       model.inputModalities,
       ["opencode-go/glm-5.3-flash", "ollama-cloud/glm-5.3-flash"].includes(slug) ? ["text", "image"] : ["text"],
@@ -57,13 +53,13 @@ test("withdrawn or uncertified reseller routes stay absent while direct-proven r
     assert.equal(MODEL_BY_SLUG.has(slug), false, `${slug} should not exist`);
   }
   for (const slug of [
+    "nousresearch/glm-5.3-flash",
     "venice/glm-5.3-flash",
   ]) {
     assert.equal(MODEL_BY_SLUG.has(slug), false, `${slug} is not route-certified`);
   }
   assert.equal(MODEL_BY_SLUG.has("commandcode/glm-5.3-flash"), true);
   assert.equal(MODEL_BY_SLUG.has("openrouter/glm-5.3-flash"), true);
-  assert.equal(MODEL_BY_SLUG.has("nousresearch/glm-5.3-flash"), true);
   assert.equal(MODEL_BY_SLUG.has("zai-api/glm-5.3-flash"), true);
   assert.equal(MODEL_BY_SLUG.has("zai-coding/glm-5.3-flash"), true);
   assert.equal(MODEL_BY_SLUG.has("opencode-go/glm-5.3-flash"), true);

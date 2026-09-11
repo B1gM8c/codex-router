@@ -37,27 +37,25 @@
   e.g. 150 output against 499 reasoning), so the inclusive total is rebuilt
   first instead of clamping the sample to zero and silently dropping it.
   Provider totals and billing are unchanged.
-- **Meta API routes for Muse Spark 1.3 and Muse Spark 1.3 Contributor.** Meta's
-  latest coding-optimized agentic model with 1M-token context, minimal-to-xhigh
-  reasoning ladder, and image support through the Responses API. New routes:
-  `meta/muse-spark-1.3` and `meta/muse-spark-1.3-contributor`.
-- **Command Code routes for Muse Spark 1.3 and Muse Spark 1.3 Contributor.**
-  Command Code Provider API now serves `meta/muse-spark-1.3` and
-  `meta/muse-spark-1.3-contributor` with 1M context. New routes:
-  `commandcode/muse-spark-1.3` and `commandcode/muse-spark-1.3-contributor`.
-- **OpenRouter route for DeepSeek V4.1 Flash.** OpenRouter has served
-  `deepseek/deepseek-v4.1-flash` since 2026-09-10 with 1M context and image
-  support. New route: `openrouter/deepseek-v4.1-flash`.
-- **Nous Research route for GLM-5.3-Flash.** Nous Research Portal lists
-  `z-ai/glm-5.3-flash` live with 1.31M context but the repo had no pin despite
-  having the non-Flash GLM-5.3 route. New route: `nousresearch/glm-5.3-flash`.
-- **Model family pin audit for DeepSeek V4.1, Muse Spark 1.3, GLM 5.3 families.**
-  Comprehensive live provider catalog research across all wired providers
-  (OpenRouter, Nous Research, OpenCode Go/Free, Command Code, Z.ai, Ollama Cloud,
-  Venice, DeepSeek API, Meta API) documented in
-  `docs/research/model-family-audit-2026-09-11.md`. Five missing pins identified
-  and added: Meta Muse Spark 1.3 routes, Command Code Muse Spark 1.3 routes,
-  OpenRouter DeepSeek V4.1 Flash, and Nous Research GLM-5.3-Flash.
+- **Meta API routes for Muse Spark 1.3 and its Contributor tier.**
+  `meta/muse-spark-1.3` and `meta/muse-spark-1.3-contributor` mirror the Muse
+  Spark 1.2 Meta routes: 1M context compacting at 900K, text and image input,
+  the minimal-to-xhigh ladder defaulting to high, reasoning summaries, and
+  `auto-tool-choice`. Meta's model page documents both ids, the window, and
+  image input; the Contributor tier is cheaper because Meta may use its traffic
+  to improve its products.
+- **Command Code route for Muse Spark 1.3.** `commandcode/muse-spark-1.3`
+  follows `commandcode/muse-spark-1.2`: 1M context compacting at 900K, text and
+  image input, `auto-tool-choice`, and only the `high` effort, because Command
+  Code does not document effort values. Command Code also lists the
+  Contributor tier, but no Command Code Contributor route is checked in for
+  either version; it remains available through `bin/curate-models commandcode`.
+- **OpenRouter route for DeepSeek V4.1 Flash.**
+  `openrouter/deepseek-v4.1-flash` takes OpenRouter's catalog values (1,048,576
+  context, text and image input, low/high/max) and compacts at 900K to keep
+  DeepSeek's 128K max-effort completion. It carries `auto-tool-choice` because
+  DeepSeek rejects forced tool choices in thinking mode. Live verification has
+  not been run; see `docs/research/deepseek-v4-1-flash-2026-09-11.md`.
 - **Preserve tool calls after large fragmented response preludes.** Allow one
   unfinished initial event within the existing 10 MiB bound and match the
   namespace relay's limit, so later MCP calls retain their client identities.
