@@ -7769,8 +7769,8 @@ test("direct DeepSeek screenshots do not saturate the prompt-token estimate", as
   const userModels = path.join(stateDir, "user-models.json");
   writeFileSync(userModels, JSON.stringify({ version: 1, models: [{
     ...legacy,
-    slug: "deepseek/deepseek-flash",
-    gatewayModel: "deepseek-flash",
+    slug: "deepseek/deepseek-v4.1-flash",
+    gatewayModel: "deepseek-v4-1-flash",
     upstreamModel: "deepseek-flash",
     compHash: "deepseek-flash-image-estimate-fixture",
   }] }));
@@ -7784,7 +7784,7 @@ test("direct DeepSeek screenshots do not saturate the prompt-token estimate", as
   });
   const image_url = `data:image/png;base64,${"A".repeat(3_600_000)}`;
   const body = JSON.stringify({
-    model: "deepseek/deepseek-flash",
+    model: "deepseek/deepseek-v4.1-flash",
     input: [{ role: "user", content: [
       { type: "input_text", text: "Inspect this screenshot." },
       { type: "input_image", image_url },
@@ -7814,7 +7814,7 @@ test("direct DeepSeek screenshots do not saturate the prompt-token estimate", as
         .filter((part) => part.type === "input_image");
       assert.equal(images.length, 1);
       assert.equal(images[0].image_url, image_url);
-      assert.equal(gatewayBodies.at(-1).model, "deepseek-flash");
+      assert.equal(gatewayBodies.at(-1).model, "deepseek-v4-1-flash");
     }
   } finally {
     await stopChild(router);

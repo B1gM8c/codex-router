@@ -30,7 +30,7 @@ https://api-docs.deepseek.com/quick_start/agent_integrations/codex/.
   Completions. The `deepseek-thinking` profile already downgrades them to
   `auto`.
 
-Route: `deepseek/deepseek-flash` with `deepseek-thinking`. Standalone web
+Route: `deepseek/deepseek-v4.1-flash` with `deepseek-thinking`. Standalone web
 search is not declared, because that capability is only listed for routes
 verified against Codex's replay path.
 

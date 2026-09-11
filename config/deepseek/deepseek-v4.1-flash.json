@@ -2,8 +2,8 @@
   "version": 1,
   "models": [
     {
-      "slug": "deepseek/deepseek-flash",
-      "gatewayModel": "deepseek-flash",
+      "slug": "deepseek/deepseek-v4.1-flash",
+      "gatewayModel": "deepseek-v4-1-flash",
       "upstreamModel": "deepseek-flash",
       "provider": "deepseek",
       "listed": true,
@@ -33,7 +33,7 @@
       ],
       "requestProfile": "deepseek-thinking",
       "supportsReasoningSummaries": true,
-      "compHash": "deepseek-flash-v1"
+      "compHash": "deepseek-v4-1-flash-v1"
     }
   ]
 }
