@@ -30,9 +30,11 @@ export async function waitForListeners(targets, { children, output, timeoutMs = 
   const deadline = Date.now() + timeoutMs;
   const pending = new Map(targets.map((target) => [target.url, target]));
   while (pending.size > 0) {
-    const exited = children.find((child) => child.exitCode !== null);
+    // A child killed by a signal reports exitCode null and signalCode set.
+    const exited = children.find((child) => child.exitCode !== null || child.signalCode !== null);
     if (exited) {
-      throw new Error(`A router child exited before it was ready (${exited.exitCode}):\n${output}`);
+      const status = exited.exitCode ?? exited.signalCode;
+      throw new Error(`A router child exited before it was ready (${status}):\n${output}`);
     }
     if (Date.now() > deadline) {
       const names = [...pending.values()].map((target) => target.name).join(", ");
@@ -40,7 +42,13 @@ export async function waitForListeners(targets, { children, output, timeoutMs = 
     }
     for (const target of [...pending.values()]) {
       try {
-        const response = await fetch(target.url, { headers: target.headers });
+        // Bound each poll so a listener that accepts but never answers cannot
+        // hold the loop past its deadline.
+        const remaining = Math.max(1, Math.min(2_000, deadline - Date.now()));
+        const response = await fetch(target.url, {
+          headers: target.headers,
+          signal: AbortSignal.timeout(remaining),
+        });
         await response.arrayBuffer();
         if (response.ok) pending.delete(target.url);
       } catch {
