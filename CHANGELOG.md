@@ -4,7 +4,7 @@
 
 - **DeepSeek V4.1 Flash is available on four providers, alongside V4.**
   DeepSeek released V4.1 Flash on 2026-09-10. New routes:
-  `deepseek/deepseek-flash` (1M window, image input, thinking with
+  `deepseek/deepseek-v4.1-flash` (1M window, image input, thinking with
   low/high/max), `opencode-go/deepseek-v4.1-flash` (OpenCode's renamed id;
   the launch-day `deepseek-flash` id is deprecated and not routed),
   `nousresearch/deepseek-v4.1-flash` (sized to the Portal's served 262,144
