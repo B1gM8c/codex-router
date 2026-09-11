@@ -571,3 +571,45 @@ test("records known actual serviceTier without echoing the requested value", asy
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("the reasoning-streamed marker persists both measured values and drops anything else", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-"));
+  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
+  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
+  try {
+    const usage = await import(`../src/usage-events.mjs?reasoning-streamed=1&ts=${Date.now()}`);
+    const record = (status, reasoningStreamed) =>
+      usage.recordUsageEvent({
+        model: "openai/reasoning-streamed-probe",
+        provider: "openai",
+        status,
+        durationMs: 4_000,
+        firstTokenMs: 1_000,
+        outputTokens: 502,
+        reasoningTokens: 98,
+        reasoningStreamed,
+      });
+    record(200, true);
+    record(201, false);
+    record(202, "yes");
+    record(203, undefined);
+    // The module caches its state path from the first import in this process,
+    // so earlier tests may have left rows in the same file: match on this
+    // test-only model slug, not on status alone.
+    const byStatus = (status) =>
+      usage
+        .recentUsageEvents()
+        .find((event) => event.model === "openai/reasoning-streamed-probe" && event.status === status);
+    assert.equal(byStatus(200).reasoningStreamed, true);
+    // False is a measurement (no reasoning delta was relayed), not an absence,
+    // so it must survive the round trip: it is what selects the subtraction.
+    assert.equal(byStatus(201).reasoningStreamed, false);
+    assert.equal("reasoningStreamed" in byStatus(202), false);
+    assert.equal("reasoningStreamed" in byStatus(203), false);
+    assert.equal(byStatus(200).reasoningTokens, 98);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
+    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

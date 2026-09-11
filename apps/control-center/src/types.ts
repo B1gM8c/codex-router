@@ -560,6 +560,7 @@ export interface UsageEvent {
   billedOutputTokens?: number;
   /** Reasoning tokens (silent thinking) included in outputTokens. */
   reasoningTokens?: number;
+  reasoningStreamed?: boolean;
   totalTokens?: number;
   estimatedInputTokens?: number;
   retries?: number;
