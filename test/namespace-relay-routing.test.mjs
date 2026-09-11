@@ -1794,6 +1794,41 @@ test("routed tool_search history declares discovered tools and restores their ca
   }
 });
 
+test("Responses-native routes preserve pre-flattened tools and call identities", async () => {
+  for (const stream of [true, false]) {
+    const payload = preflattenedCommandCodeMcpPayload(stream, "meta/muse-spark-1.2");
+    const name = payload.tools[0].name;
+    const prior = { type: "function_call", name, call_id: "call_prior", arguments: "{}" };
+    payload.input = [
+      { type: "message", role: "user", content: "Call the monitor snapshot tool again." },
+      prior,
+      { type: "function_call_output", call_id: prior.call_id, output: "{}" },
+    ];
+    payload.tool_choice = { type: "function", name };
+    const call = { ...prior, call_id: "call_flat_response" };
+    const result = await scenario(stream, {
+      model: payload.model,
+      requestPayload: () => payload,
+      sseBody: () => [
+        sseEvent({ type: "response.output_item.done", item: call }),
+        sseEvent({ type: "response.completed" }),
+        "data: [DONE]\n\n",
+      ].join(""),
+      jsonBody: () => ({ id: "resp_flat_json", output: [call] }),
+    });
+    assert.equal(result.gatewayBodies.length, 1);
+    const outgoing = result.gatewayBodies[0];
+    assert.equal(outgoing.model, "meta-muse-spark-1-2");
+    assert.deepEqual(outgoing.tools, payload.tools, "do not synthesize namespace declarations");
+    assert.deepEqual(outgoing.input, payload.input);
+    assert.equal(outgoing.tool_choice, "auto", "retain Meta's existing tool-choice policy");
+    const returned = stream
+      ? functionCallsFromSse(result.clientBody).get(call.call_id)
+      : JSON.parse(result.clientBody).output[0];
+    assert.deepEqual(returned, call, "preserve the flat response identity");
+  }
+});
+
 test("Responses-native routed providers inherit the model on fresh local thread calls", async () => {
   const options = {
     model: "meta/muse-spark-1.2",
