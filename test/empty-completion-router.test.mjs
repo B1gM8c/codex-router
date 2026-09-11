@@ -1477,21 +1477,49 @@ function writeReasoningDelta(response) {
   response.write(REASONING_DELTA_SSE);
 }
 
-function delayedAfterReasoning(later, delayMs, onPost) {
+// Holds `later` until `delayMs` passes, or until the router closes the upstream
+// first. A route whose bound fires closes the attempt, so content can never win
+// a race against that timer on a loaded runner: the delay only decides when a
+// route that is *not* bounded receives its content. `onSettled` is called
+// exactly once, with "content" or "closed" for whichever happened first; the
+// upstream close can reach the gateway after the client's response has ended,
+// so tests await it rather than reading a flag.
+function delayedAfterReasoning(later, delayMs, onPost, onSettled) {
   return (_request, response) => {
     onPost?.();
     writeReasoningDelta(response);
-    const timer = setTimeout(() => response.end(later), delayMs);
-    response.once("close", () => clearTimeout(timer));
+    const timer = setTimeout(() => {
+      onSettled?.("content");
+      response.end(later);
+    }, delayMs);
+    response.once("close", () => {
+      clearTimeout(timer);
+      if (!response.writableEnded) onSettled?.("closed");
+    });
   };
+}
+
+function upstreamOutcome() {
+  let settle;
+  const settled = new Promise((resolve) => {
+    settle = resolve;
+  });
+  return { settle, settled };
 }
 
 for (const model of [GROK_OAUTH_MODEL, GROK_API_MODEL, "deepseek/deepseek-v4-pro"]) {
   test(`${model} uses its own bound after reasoning starts`, async () => {
+    const oauth = model === GROK_OAUTH_MODEL;
     let posts = 0;
-    const gw = await gateway(delayedAfterReasoning(CONTENT_SSE, 150, () => {
+    const upstream = upstreamOutcome();
+    // Grok OAuth gets its content a whole second after reasoning -- forty times
+    // the 25ms prelude -- so a route that wrongly applied the prelude closes the
+    // attempt long before it arrives. Bounded routes are held until the router
+    // closes them; the ten-second fallback only turns a missing bound into a
+    // failed assertion instead of a hung test.
+    const gw = await gateway(delayedAfterReasoning(CONTENT_SSE, oauth ? 1_000 : 10_000, () => {
       posts += 1;
-    }));
+    }, upstream.settle));
     const routerPort = await openPort();
     const router = run({
       ...routerEnv(gw.port, routerPort),
@@ -1502,14 +1530,16 @@ for (const model of [GROK_OAUTH_MODEL, GROK_API_MODEL, "deepseek/deepseek-v4-pro
       const result = await readRouted(routerPort, { ...TURN_BODY, model });
       const [event] = await waitForUsageEvents(router.stateDir, 1, router);
       assert.equal(posts, 1, "never replay a visible stream");
-      if (model === GROK_OAUTH_MODEL) {
+      if (oauth) {
         assert.match(result.body, /Recovered/);
         assert.doesNotMatch(result.body, /event: error/);
+        assert.equal(await upstream.settled, "content");
         assert.equal(event.status, 200);
         assert.equal(event.emptyCompletionPreludeLimit, undefined);
       } else {
         assert.doesNotMatch(result.body, /Recovered/);
         assert.match(result.body, /precontent_limit/);
+        assert.equal(await upstream.settled, "closed", "the router's bound closed the attempt");
         assert.equal(event.status, 502);
       }
     } finally {
@@ -1521,9 +1551,11 @@ for (const model of [GROK_OAUTH_MODEL, GROK_API_MODEL, "deepseek/deepseek-v4-pro
 
 test("invalid Grok stall env keeps the ten-minute default instead of the prelude", async () => {
   let posts = 0;
-  const gw = await gateway(delayedAfterReasoning(CONTENT_SSE, 150, () => {
+  const upstream = upstreamOutcome();
+  // Forty times the prelude, for the same reason as the bound test above.
+  const gw = await gateway(delayedAfterReasoning(CONTENT_SSE, 1_000, () => {
     posts += 1;
-  }));
+  }, upstream.settle));
   const routerPort = await openPort();
   const router = run({
     ...routerEnv(gw.port, routerPort),
@@ -1536,6 +1568,7 @@ test("invalid Grok stall env keeps the ten-minute default instead of the prelude
     assert.equal(posts, 1);
     assert.match(result.body, /Recovered/);
     assert.doesNotMatch(result.body, /precontent_limit/);
+    assert.equal(await upstream.settled, "content");
   } finally {
     await stopChild(router);
     await closeServer(gw.server);
@@ -1563,7 +1596,9 @@ test("a Grok headers-only attempt still uses the 30-second prelude, not the stal
     await waitFor(`${callerBaseUrl(routerPort, CALLER_KEY)}/models`, router);
     const started = Date.now();
     const result = await readRouted(routerPort, { ...TURN_BODY, model: GROK_OAUTH_MODEL });
-    assert.ok(Date.now() - started < 900, "Grok headers-only still uses the prelude");
+    // The alternative is the ten-minute stall bound, so a generous ceiling still
+    // tells the two apart without timing a loaded runner to the millisecond.
+    assert.ok(Date.now() - started < 5_000, "Grok headers-only still uses the prelude");
     assert.match(result.body, /Recovered/);
     assert.equal(result.headers["x-upstream-attempt"], "retry");
     assert.equal(posts, 2);
@@ -1585,14 +1620,16 @@ test("a genuinely stalled Grok stream respects the separate bound without replay
   const routerPort = await openPort();
   const router = run({
     ...routerEnv(gw.port, routerPort),
-    CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_MS: "1000",
+    // The prelude sits far above the ceiling below, so the stall bound is the
+    // only timer that can end this stream inside it, even on a loaded runner.
+    CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_MS: "10000",
     CODEX_ROUTER_GROK_STREAM_STALL_MS: "50",
   });
   try {
     await waitFor(`${callerBaseUrl(routerPort, CALLER_KEY)}/models`, router);
     const started = Date.now();
     const result = await readRouted(routerPort, { ...TURN_BODY, model: GROK_OAUTH_MODEL });
-    assert.ok(Date.now() - started < 900, "uses the independent stall bound");
+    assert.ok(Date.now() - started < 5_000, "uses the independent stall bound");
     assert.match(result.body, /precontent_limit/);
     assert.equal(posts, 1);
     const [event] = await waitForUsageEvents(router.stateDir, 1, router);
