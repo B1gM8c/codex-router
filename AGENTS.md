@@ -2046,6 +2046,33 @@ xAI and Codex has its own idle limit. The router's post-prologue stall guard
    `test/responses-heartbeat.test.mjs`, `test/fetch-transport.test.mjs`, and the
    Grok cases in `test/empty-completion-router.test.mjs`.
 
+## Routed assistant messages carry a phase label
+
+Native models label every assistant message `commentary` or `final_answer`.
+Codex folds commentary into its "Worked for ..." group, renders the final
+answer below it, and finds a thread's answer with
+`json_extract(item_json, '$.phase') = 'final_answer'`. Routed providers send no
+label, so `src/message-phase.mjs` assigns one.
+
+1. **The rule is the one native turns follow, read from item order.** A message
+   that another output item follows is commentary; the last message of a
+   `response.completed`, `response.incomplete`, or `response.done` is the final
+   answer. Never infer it from the text.
+2. **A provider's phase always wins.** Only an absent or null phase is filled,
+   so a Responses provider that already labels messages passes through
+   unchanged.
+3. **Hold one frame, briefly.** Only the message's `output_item.done` waits,
+   until the next item opens or the response settles; deltas stream live and
+   every frame held behind it is replayed in order. A failed, errored, or
+   unterminated response, invalid UTF-8, or an exhausted hold bound releases the
+   original bytes unlabelled.
+4. **It is metadata, not transcript.** It adds no text, costs no model tokens,
+   and LiteLLM rebuilds chat history from role and content, so a replayed label
+   never reaches a chat-completions provider.
+5. **Routed streams only, after the item-lifecycle normalizer**, so items are
+   already sequential. Coverage lives in `test/message-phase.test.mjs` and the
+   routed case in `test/namespace-relay-routing.test.mjs`.
+
 ## Routed subagent regression prevention
 
 - A normal `/responses` smoke test does not cover Codex collaboration. Current
