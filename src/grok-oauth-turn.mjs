@@ -358,11 +358,26 @@ function ensureToolCall(state, item, itemId, { complete = false } = {}) {
   return entry;
 }
 
+function completedStatus(response) {
+  const status = response?.status;
+  if (!status || status === "completed") return "completed";
+  return status === "failed" ? "failed" : "incomplete";
+}
+
+function recordTerminal(state, terminalStatus, response) {
+  state.terminalStatus = terminalStatus;
+  state.usage = mapUpstreamUsage(response?.usage);
+  attachActualServiceTier(state, response);
+}
+
 export function applyResponsesEvent(state, event) {
   if (!event || typeof event !== "object") return state;
-  // Once an upstream failure is known, later frames cannot revive this turn
-  // or add actions to it. In particular, [DONE] is never success evidence.
-  if (state.terminalStatus === "failed" || state.terminalStatus === "incomplete") return state;
+  // The first terminal seals the attempt. A failure cannot be revived, and a
+  // completed terminal certifies only what preceded it: content, reasoning,
+  // tool, or terminal frames after it were never covered by a successful
+  // terminal and cannot add actions or change the outcome. In particular,
+  // [DONE] is never success evidence.
+  if (state.terminalStatus) return state;
   switch (event.type) {
     case "response.output_text.delta": {
       if (event.delta) {
@@ -414,25 +429,16 @@ export function applyResponsesEvent(state, event) {
       break;
     }
     case "response.completed": {
-      const status = event.response?.status;
-      state.terminalStatus = !status || status === "completed"
-        ? "completed"
-        : status === "failed" ? "failed" : "incomplete";
-      state.usage = mapUpstreamUsage(event.response?.usage);
-      attachActualServiceTier(state, event.response);
+      recordTerminal(state, completedStatus(event.response), event.response);
       break;
     }
     case "response.failed":
     case "error": {
-      state.terminalStatus = "failed";
-      state.usage = mapUpstreamUsage(event.response?.usage);
-      attachActualServiceTier(state, event.response);
+      recordTerminal(state, "failed", event.response);
       break;
     }
     case "response.incomplete": {
-      state.terminalStatus = "incomplete";
-      state.usage = mapUpstreamUsage(event.response?.usage);
-      attachActualServiceTier(state, event.response);
+      recordTerminal(state, "incomplete", event.response);
       break;
     }
     default:

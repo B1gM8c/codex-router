@@ -394,7 +394,8 @@ is correct." is not talked into a call the client would then run. Raise
 user-message path; those settings do not weaken the post-tool invariant.
 
 For a quiet worker, run `bin/control activity <thread-id>` from the installed
-checkout. The command reads the capability-protected `/v1/activity` endpoint;
+checkout (on Windows, `codex-router.ps1 activity <thread-id>` from
+`%LOCALAPPDATA%\codex-router`). The command reads the capability-protected `/v1/activity` endpoint;
 unauthenticated `/health` keeps its existing compact contract. Active requests
 remain visible until their handlers release resources, independently of tray
 record retention. The snapshot includes router-upstream attempt count, raw byte
@@ -449,9 +450,30 @@ Grok OAuth uses a separate ten-minute stall bound after the prologue has been
 released, including while reasoning is in progress. A pause longer than the
 initial 30-second prologue budget is not by itself an empty completion.
 `CODEX_ROUTER_GROK_STREAM_STALL_MS` accepts a positive millisecond value to
-adjust this bound; invalid values retain the ten-minute default. The headers-only
-budget, parser byte limits, cancellation, and prohibition on replaying a visible
-stream still apply. Other provider routes retain their existing stall bound.
+adjust this bound; invalid values, and values too large for a Node timer, retain
+the ten-minute default. The headers-only budget, parser byte limits,
+cancellation, and prohibition on replaying a visible stream still apply. Other
+provider routes retain their existing stall bound.
+
+Every hop on the Grok path is sized from that bound plus one minute, and never
+below what the hop allowed before: the router's pool to the gateway, the
+gateway's `stream_timeout` for Grok deployments, and the forwarder's pool to
+xAI. Each of them used to end a silent stream first -- the two Undici pools
+after five minutes, with `UND_ERR_BODY_TIMEOUT`. Codex itself abandons a stream
+after five minutes without a data event (`stream_idle_timeout_ms`) and sends the
+turn again, which bills a second attempt; SSE comment keep-alives do not reset
+that timer. While a Grok stream is silent after its `response.created`, the
+router therefore relays a `response.in_progress` event that carries only the
+response's own id, model, and creation time. It is sent only between complete
+events and never after a terminal event. `CODEX_ROUTER_GROK_HEARTBEAT_MS` sets
+the interval (default 60000, at most 240000). Other routes receive no heartbeat.
+
+A failure the upstream states before any content (`error`, `response.failed`,
+or `response.incomplete`) is released to the client at once and is never
+retried as an empty completion. When the forwarder rejects a failed Grok
+attempt, its `upstream-terminal-failed=true` log line carries any
+provider-reported `input_tokens` and `output_tokens`; the router's usage row for
+that attempt has no token counts.
 
 Operators diagnosing an unusually slow upstream can temporarily change the
 30-second bound with `CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_MS` and the 1 MiB

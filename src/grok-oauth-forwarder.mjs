@@ -48,8 +48,12 @@ import {
 import { knownServiceTier } from "./request-diagnostics.mjs";
 import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
+import { grokTransportIdleTimeoutMs } from "./grok-stream-timeouts.mjs";
 
-installStableFetchTransport();
+// This process carries only Grok traffic, so its whole pool outlasts the
+// router's stall guard. Undici's 300s default would otherwise end a long
+// reasoning pause with UND_ERR_BODY_TIMEOUT before the guard could decide.
+installStableFetchTransport({ bodyTimeoutMs: grokTransportIdleTimeoutMs() });
 
 // LiteLLM speaks OpenAI Chat Completions to this forwarder. It reuses the
 // official Grok CLI OAuth session and translates to xAI's Responses proxy.
@@ -498,10 +502,19 @@ function nextSseBoundary(buffer) {
   return crlf < lf ? { at: crlf, size: 4 } : { at: lf, size: 2 };
 }
 
+const TERMINAL_RESPONSES_EVENTS = new Set([
+  "response.completed",
+  "response.failed",
+  "response.incomplete",
+  "error",
+]);
+
+// Returns true once the dispatched event was a Responses terminal.
 function dispatchSseBlock(rawEvent, handlers) {
   const event = parseSseBlockEvent(rawEvent);
-  if (event === undefined) return;
+  if (event === undefined) return false;
   handlers(event);
+  return TERMINAL_RESPONSES_EVENTS.has(event?.type);
 }
 
 async function consumeResponsesStream(upstreamBody, handlers) {
@@ -516,7 +529,13 @@ async function consumeResponsesStream(upstreamBody, handlers) {
     while ((boundary = nextSseBoundary(buffer))) {
       const rawEvent = buffer.slice(0, boundary.at);
       buffer = buffer.slice(boundary.at + boundary.size);
-      dispatchSseBlock(rawEvent, handlers);
+      if (dispatchSseBlock(rawEvent, handlers)) {
+        // The first terminal ends the attempt. An upstream that holds its
+        // socket open afterwards must not delay the answer until a transport
+        // timeout, and nothing after the terminal is parsed.
+        await reader.cancel().catch(() => {});
+        return;
+      }
     }
   }
   buffer += decoder.decode();
@@ -676,8 +695,14 @@ async function handleChatCompletions(request, response) {
     const message = status === "missing"
       ? "Grok ended the upstream response stream without a successful terminal event."
       : `Grok returned an unsuccessful upstream response (${status}).`;
+    // The error response below carries no usage the router can meter, so the
+    // attempt is recorded without tokens. Keep any provider-reported counts
+    // visible to the operator here rather than dropping them silently.
+    const counts = turn.usage
+      ? ` input_tokens=${turn.usage.prompt_tokens} output_tokens=${turn.usage.completion_tokens}`
+      : "";
     console.error(
-      `[grok-oauth] upstream-terminal-failed=true phase=${phase} model=${model} terminal=${status} ${upstreamAttemptTiming(phase, attempt)}`,
+      `[grok-oauth] upstream-terminal-failed=true phase=${phase} model=${model} terminal=${status}${counts} ${upstreamAttemptTiming(phase, attempt)}`,
     );
     if (wantsStream && streamStarted) {
       endStreamedResponse(response, { message });
@@ -818,7 +843,16 @@ async function handleChatCompletions(request, response) {
       // Keep both client tools and the private final answer withheld until
       // response.completed. An item.done followed by EOF/failure is not a
       // certified repair, even when its arguments look complete.
-      if (rejectUnsuccessfulTurn(second, "repair", repairAttempt)) return;
+      if (strictAfterToolRepair) {
+        if (rejectUnsuccessfulTurn(second, "repair", repairAttempt)) return;
+      } else if (second.terminalStatus !== "completed") {
+        // An optional retry is speculative: the first answer already completed
+        // successfully, so a retry that did not complete is discarded and the
+        // first answer is kept below, exactly as for a failed HTTP retry.
+        console.error(
+          `[grok-oauth] progress-only-retry-failed=true model=${model} terminal=${second.terminalStatus} ${upstreamAttemptTiming("repair", repairAttempt)}`,
+        );
+      }
       retried = true;
       const repair = strictAfterToolRepair
         ? classifyAfterToolRepair(second)

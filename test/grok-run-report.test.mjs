@@ -131,6 +131,21 @@ test('CLI input totals include separately reported cached tokens', () => {
   assert.equal(report.tokens.reasoningTokens.value, null);
 });
 
+test('collapsed retry rows count billed spend, not only the selected attempt', () => {
+  const row = { requestId: 'r1', inputTokens: 100, outputTokens: 10, billedInputTokens: 190, billedOutputTokens: 25 };
+  const plain = { requestId: 'r2', inputTokens: 40, outputTokens: 5 };
+  const report = buildGrokRunReport({ threadId: 'worker', startedAt: at(0), endedAt: at(20),
+    activityEvents: [{ recent: [
+      { requestId: 'r1', threadId: 'worker', startedAt: Date.parse(at(1)), endedAt: Date.parse(at(5)) },
+      { requestId: 'r2', threadId: 'worker', startedAt: Date.parse(at(6)), endedAt: Date.parse(at(11)) },
+    ] }],
+    usageEvents: [row, plain] });
+  assert.equal(report.tokenSource, 'router_usage');
+  assert.equal(report.tokens.inputTokens.value, 230);
+  assert.equal(report.tokens.outputTokens.value, 30);
+  assert.equal(report.outputTokensPerRequestSecond, 30 / 9);
+});
+
 test('authoritative usage wins over client counters and retains multiple charged attempts', () => {
   const row = { requestId: 'r1', inputTokens: 20, outputTokens: 30 };
   const report = buildGrokRunReport({ threadId: 'worker', startedAt: at(0), endedAt: at(10),

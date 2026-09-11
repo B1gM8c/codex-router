@@ -266,6 +266,68 @@ test("Grok 4.6 usage rows correlate with activity id across success, failure, an
   }
 });
 
+test("a canceled native stream settles as canceled, not as the upstream's 200", async () => {
+  let upstreamClosed;
+  const upstreamGone = new Promise((resolve) => {
+    upstreamClosed = resolve;
+  });
+  const native = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.once("close", upstreamClosed);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    // One event, then the upstream keeps streaming until the client leaves.
+    response.write('data: {"type":"response.image_generation_call.partial_image"}\n\n');
+  });
+  const gateway = await mockServer((_request, response) => {
+    json(response, 200, { ok: true, credential_present: true });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "request-diagnostics-native-"));
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const canceler = new AbortController();
+    await fetch(`${routerBase(routerPort)}/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer native-session-token" },
+      body: JSON.stringify({ model: "gpt-image-2", prompt: "a lighthouse", stream: true }),
+      signal: canceler.signal,
+    })
+      .then(async (response) => {
+        assert.equal(response.status, 200);
+        await response.body.getReader().read();
+        canceler.abort();
+      })
+      .catch((error) => {
+        if (error?.name !== "AbortError") throw error;
+      });
+    await upstreamGone;
+    const [event] = await waitForUsageEvents(stateDir, 1, router);
+    assert.equal(event.status, 0);
+    assert.equal(event.provider, "openai");
+    const activity = await (await fetch(`${routerBase(routerPort)}/activity`)).json();
+    const settled = activity.recent.find((entry) => entry.requestId === event.requestId);
+    assert.ok(settled, JSON.stringify(activity));
+    assert.equal(settled.state, "canceled");
+    assert.equal(settled.cancelReason, "client_disconnected");
+    assert.equal(settled.status, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("a non-Grok-4.6 turn still records requestId and omits contextBytes", async () => {
   const gateway = await mockServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/health") {

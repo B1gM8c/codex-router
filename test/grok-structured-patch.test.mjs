@@ -24,6 +24,15 @@ test("structured patch preserves Unicode, quotes, slash and empty logical lines"
   assert.deepEqual(value, before);
 });
 
+test("structured patch refuses paths that a native header trim would change", () => {
+  // JavaScript's trim leaves U+0085 alone; Rust's, which the native patch
+  // header parser uses, removes it.
+  for (const path of [" notes.txt", "notes.txt ", "notes.txt\u0085", "\u00a0notes.txt", "notes.txt\ufeff", "notes.txt\u2028"]) {
+    assert.throws(() => serializeStructuredPatch(wrap(add(path))), { code: "nonliteral_path" }, JSON.stringify(path));
+  }
+  assert.match(serializeStructuredPatch(wrap(add("dir/a\u0085b.txt"))), /\*\*\* Add File: dir\/a\u0085b\.txt/u);
+});
+
 test("update explicitly encodes context, anchor, EOF and exact leading whitespace", () => {
   const value = wrap(update([
     { kind: "context", text: "  before" }, removeLine("\told"), addLine("  new"),

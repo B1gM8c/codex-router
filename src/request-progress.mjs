@@ -40,7 +40,7 @@ export function createRequestProgress({ now = Date.now, recentLimit = 128, recen
         },
         attempt() {
           if (record.state !== "running") return;
-          update({ upstreamAttempts: (record.upstreamAttempts || 0) + 1, phase: "awaiting_upstream", terminalEvent: undefined });
+          update({ upstreamAttempts: (record.upstreamAttempts || 0) + 1, phase: "awaiting_upstream", terminalEvent: undefined, terminalStatus: undefined });
         },
         headers() {
           update({ lastHeadersAt: now(), ...(record.state === "running" ? { phase: "awaiting_event" } : {}) });
@@ -55,9 +55,17 @@ export function createRequestProgress({ now = Date.now, recentLimit = 128, recen
             type === "response.custom_tool_call_input.delta" ||
             ["function_call", "custom_tool_call"].includes(payload.item?.type)) phase = "tool_call";
           else if (["response.completed", "response.failed", "response.incomplete", "error"].includes(type)) phase = "finishing";
-          const failed = ["response.failed", "response.incomplete", "error"].includes(type);
+          // `response.completed` can carry a failed or incomplete status inside
+          // an HTTP 200 stream; the outer event type alone is not success.
+          const embeddedStatus = type === "response.completed" ? payload.response?.status : undefined;
+          const unsuccessfulCompletion =
+            typeof embeddedStatus === "string" && embeddedStatus !== "completed";
+          const failed = unsuccessfulCompletion || ["response.failed", "response.incomplete", "error"].includes(type);
           update({
             ...(failed ? { terminalEvent: type } : {}),
+            ...(unsuccessfulCompletion
+              ? { terminalStatus: /^[a-z_]{1,32}$/.test(embeddedStatus) ? embeddedStatus : "unknown" }
+              : {}),
             lastEventAt: now(),
             receivedEvents: record.receivedEvents + 1,
             ...(record.state === "running" && phase ? { phase } : {}),

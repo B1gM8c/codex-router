@@ -197,8 +197,14 @@ export function normalizeTokenUsage(value) {
 // send twice cost twice; the meter has to say so, or the retry marker names a
 // turn whose reported spend still looks like one attempt.
 export function mergeTokenUsage(first, second) {
-  if (!first) return second;
-  if (!second) return first;
+  if (!first || !second) {
+    // Only one attempt reported usage, but the turn was still sent twice, so
+    // that attempt's service tier cannot label the pair.
+    const only = first || second;
+    if (!only) return only;
+    const { serviceTier: _serviceTier, serviceTierUnknown: _serviceTierUnknown, ...rest } = only;
+    return rest;
+  }
   const cachedInputTokens =
     first.cachedInputTokens === undefined && second.cachedInputTokens === undefined
       ? undefined

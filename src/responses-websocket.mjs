@@ -1182,6 +1182,10 @@ class ResponsesWebSocketPeer {
           if (["error", "response.failed", "response.incomplete"].includes(event.type)) {
             terminalFailure = true;
             terminalSeen = true;
+            // Codex ends the turn on this event and may send its retry on the
+            // same socket, where it queues behind this drain. A gateway that
+            // holds the stream open after a failure must not stall that retry.
+            setTimeout(() => controller.abort(), 5_000).unref?.();
             return true;
           }
           return true;

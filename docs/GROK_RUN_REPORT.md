@@ -54,14 +54,22 @@ Interpretation:
 - Token fields include `reported` and `missing` coverage. Input totals include
   cache reads and writes for both harnesses. Reasoning is part of output tokens,
   not an extra amount to add to the output total.
+- Router token totals use a usage row's billed counters when present. A Grok
+  progress-only retry keeps the selected attempt in `inputTokens` and
+  `outputTokens` and the spend of both attempts in `billedInputTokens` and
+  `billedOutputTokens`; the report counts the spend.
 - Request throughput divides output tokens by full request duration only when
   request/count coverage matches. It is not a decoding-speed estimate. Text
   time-to-first-token is never subtracted from reasoning-inclusive token timing.
 - Tool duration is the union of observed tool intervals, avoiding double counting
-  parallel tools. `firstTestAfterMs` recognizes common test-runner commands;
-  only direct command positions are recognized. This measures the first attempt,
-  which may fail before the test runner starts. Quoted examples, filenames and
-  comments do not count; heredocs and indirect wrapper scripts are omitted.
+  parallel tools. `firstTestAfterMs` recognizes `npm test`, `npm run test`,
+  `vitest`, `jest`, `npx vitest`, `npx jest`, and `node --test` in direct
+  command positions of a Codex tool call's `cmd`. This measures the first
+  attempt, which may fail before the test runner starts. Quoted examples,
+  filenames and comments do not count; heredocs and indirect wrapper scripts are
+  omitted, and so are single-`|` pipelines, environment prefixes such as
+  `CI=1 npm test`, `pnpm`/`yarn`, `timeout` wrappers, and tools that carry the
+  command in a `command` field instead of `cmd`.
 - CLI tool failures include terminal shell exit codes, signals and timeouts,
   even when the surrounding tool reports `completed`. Repeated updates for one
   tool call are counted once; interim shell output is not a terminal result.

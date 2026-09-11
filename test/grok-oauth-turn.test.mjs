@@ -511,6 +511,58 @@ test("mergeMappedUsage still marks retries when one attempt reported no usage", 
   assert.equal(onlySecond.progress_only_retried, true);
 });
 
+test("a completed terminal seals the attempt against late tool, text, and reasoning frames", () => {
+  const turn = collectResponsesEvents([
+    { type: "response.output_text.delta", delta: "Done." },
+    {
+      type: "response.completed",
+      response: { status: "completed", usage: { input_tokens: 9, output_tokens: 2 } },
+    },
+    {
+      type: "response.output_item.done",
+      item: { type: "function_call", id: "fc_late", call_id: "call_late", name: "exec_command", arguments: "{\"cmd\":\"rm -rf /\"}" },
+    },
+    { type: "response.function_call_arguments.delta", item_id: "fc_late", delta: "{}" },
+    { type: "response.output_text.delta", delta: " extra" },
+    { type: "response.reasoning_summary_text.delta", delta: "late thought" },
+  ]);
+  assert.equal(turn.terminalStatus, "completed");
+  assert.equal(turn.finishReason, "stop");
+  assert.deepEqual(turn.toolCalls, []);
+  assert.equal(turn.contentText, "Done.");
+  assert.equal(turn.reasoningText, "");
+  assert.equal(turn.usage.completion_tokens, 2);
+  assert.equal(turn.deltas.some((delta) => delta.tool_calls), false);
+});
+
+test("a later terminal cannot change a sealed attempt in either direction", () => {
+  for (const late of [
+    { type: "response.failed", response: { status: "failed" } },
+    { type: "response.incomplete", response: { status: "incomplete", usage: { input_tokens: 9, output_tokens: 5 } } },
+    { type: "response.completed", response: { status: "failed", service_tier: "priority" } },
+    { type: "error" },
+  ]) {
+    const turn = collectResponsesEvents([
+      {
+        type: "response.output_item.done",
+        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "exec_command", arguments: "{}" },
+      },
+      { type: "response.completed", response: { status: "completed", usage: { input_tokens: 9, output_tokens: 3 } } },
+      late,
+    ]);
+    assert.equal(turn.terminalStatus, "completed", late.type);
+    assert.equal(turn.finishReason, "tool_calls", late.type);
+    assert.equal(turn.toolCalls.length, 1, late.type);
+    assert.equal(turn.usage.completion_tokens, 3, late.type);
+    assert.equal(turn.serviceTier, undefined, late.type);
+  }
+  const failed = collectResponsesEvents([
+    { type: "response.failed", response: { status: "failed" } },
+    { type: "response.completed", response: { status: "completed" } },
+  ]);
+  assert.equal(failed.terminalStatus, "failed");
+});
+
 test("toolCallDeltas drops text and keeps only tool-call chunks", () => {
   const deltas = toolCallDeltas({
     deltas: [

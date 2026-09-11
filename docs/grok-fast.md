@@ -16,7 +16,10 @@ subscription billing or account entitlement.
 
 LiteLLM 1.96.0 drops the normal Responses `service_tier` argument on the Chat
 bridge, so Router copies known values into `extra_body` on this exact route.
-The Grok forwarder copies the value only for upstream model `grok-4.6`.
+The Grok forwarder copies the value only for upstream model `grok-4.6`. Every
+other routed body goes out without `service_tier`: a turn that fails over from
+Grok 4.6 to another model, or a compaction for another route, is never sent a
+priority request that route did not offer.
 
 The actual tier is taken only from the upstream terminal response. Streaming
 Chat responses carry a bounded `provider_specific_fields.grok_service_tier`
@@ -29,7 +32,9 @@ Usage rows distinguish `requestedServiceTier`, `serviceTier`, and an optional
 `serviceTierUnknown` flag. Missing provider data remains missing. Unknown raw
 values are not logged. A provider returning `default` after a `priority` request
 is recorded as default. Retry billing is never assigned one attempt's tier;
-aggregated attempts omit the actual tier. No tier-based cost is calculated here.
+aggregated attempts omit the actual tier, including a turn the router retried
+after an empty completion or a pre-content limit when only one attempt reported
+usage. No tier-based cost is calculated here.
 
 ## Verification
 

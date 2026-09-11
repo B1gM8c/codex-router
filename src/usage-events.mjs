@@ -178,7 +178,13 @@ export function recordUsageEvent({
 }) {
   const diagnostics = usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch });
   const event = {
-    ...serviceTierMetadata({ requestedServiceTier, serviceTier, serviceTierUnknown, retries }),
+    ...serviceTierMetadata({
+      requestedServiceTier,
+      serviceTier,
+      serviceTierUnknown,
+      retries,
+      emptyCompletionRetried,
+    }),
     meteringVersion: 1,
     at: new Date(at).toISOString(),
     model: safeText(model, "unknown"),

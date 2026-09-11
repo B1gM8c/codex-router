@@ -33,6 +33,16 @@ name: Grok apply_patch protocol
       - "src/response-usage.mjs"
       - "src/usage-events.mjs"
       - "scripts/verify-grok-apply-patch-guidance.mjs"
+      - "src/config-manager.mjs"
+      - "src/caller-key-client-refresh.mjs"
+      - "src/service-linux.mjs"
+      - "src/service-macos.mjs"
+      - "src/service-windows.mjs"
+      - "src/fetch-transport.mjs"
+      - "src/grok-stream-timeouts.mjs"
+      - "src/responses-heartbeat.mjs"
+      - "src/empty-completion-guard.mjs"
+      - "test/grok-structured-patch*.test.mjs"
       - ".github/workflows/grok-apply-patch-guidance.yml"
   pull_request:
     paths:
@@ -61,6 +71,16 @@ name: Grok apply_patch protocol
       - "src/response-usage.mjs"
       - "src/usage-events.mjs"
       - "scripts/verify-grok-apply-patch-guidance.mjs"
+      - "src/config-manager.mjs"
+      - "src/caller-key-client-refresh.mjs"
+      - "src/service-linux.mjs"
+      - "src/service-macos.mjs"
+      - "src/service-windows.mjs"
+      - "src/fetch-transport.mjs"
+      - "src/grok-stream-timeouts.mjs"
+      - "src/responses-heartbeat.mjs"
+      - "src/empty-completion-guard.mjs"
+      - "test/grok-structured-patch*.test.mjs"
       - ".github/workflows/grok-apply-patch-guidance.yml"
   workflow_dispatch: {}
 

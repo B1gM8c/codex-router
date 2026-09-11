@@ -133,6 +133,18 @@ The original framed input is not valid native patch syntax if the hook is
 absent or untrusted; this is not a claim that arbitrary hook failures deny
 ordinary native tool calls.
 
+To replace the input, the hook must answer `permissionDecision: "allow"`;
+Codex refuses `updatedInput` otherwise. Whether that decision also skips an
+approval Codex would request under `untrusted` or `on-request` is not
+established by the native probe, which runs with `approval_policy="never"`.
+Until a native control under those policies shows an approval request or an
+unchanged file, use hook mode only where the patch would not need approval.
+
+While either codec is enabled it applies to the whole response. An ordinary
+tool call in the same response whose streamed arguments the relay cannot verify
+-- duplicate JSON keys, or an arguments event with no known output item -- fails
+the stream instead of passing through. This affects only the opt-in experiment.
+
 Diagnostics add only optional `mode: "client_hook"` to `grokStructuredPatch`.
 Old metadata and usage records remain readable. No new content logging is
 introduced.

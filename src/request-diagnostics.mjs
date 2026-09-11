@@ -97,13 +97,22 @@ export function actualServiceTierFromValue(value) {
   return known ? { kind: "known", value: known } : { kind: "unknown" };
 }
 
-export function serviceTierMetadata({ requestedServiceTier, serviceTier, serviceTierUnknown, retries } = {}) {
+export function serviceTierMetadata({
+  requestedServiceTier,
+  serviceTier,
+  serviceTierUnknown,
+  retries,
+  emptyCompletionRetried,
+} = {}) {
   const requested = knownServiceTier(requestedServiceTier);
   const actual = knownServiceTier(serviceTier);
+  // A row that covers more than one charged attempt cannot carry one
+  // attempt's tier, whichever retry path produced the second attempt.
+  const multipleAttempts = Boolean(retries) || emptyCompletionRetried === true;
   return {
     ...(requested ? { requestedServiceTier: requested } : {}),
-    ...(!retries && actual ? { serviceTier: actual } : {}),
-    ...(!retries && !actual && serviceTierUnknown === true ? { serviceTierUnknown: true } : {}),
+    ...(!multipleAttempts && actual ? { serviceTier: actual } : {}),
+    ...(!multipleAttempts && !actual && serviceTierUnknown === true ? { serviceTierUnknown: true } : {}),
   };
 }
 

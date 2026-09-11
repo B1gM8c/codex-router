@@ -81,6 +81,43 @@ test("unsuccessful response terminal is failed even under an HTTP 200 envelope",
 });
 
 
+test("response.completed carrying an unsuccessful embedded status is failed", () => {
+  for (const status of ["failed", "incomplete", "cancelled"]) {
+    const tracker = createRequestProgress();
+    const request = tracker.begin();
+    request.attempt();
+    request.event({ type: "response.completed", response: { status } });
+    request.finish(200);
+    const [record] = tracker.snapshot().recent;
+    assert.equal(record.state, "failed", status);
+    assert.equal(record.terminalEvent, "response.completed");
+    assert.equal(record.terminalStatus, status);
+  }
+  for (const response of [undefined, {}, { status: "completed" }]) {
+    const tracker = createRequestProgress();
+    const request = tracker.begin();
+    request.event({ type: "response.completed", ...(response ? { response } : {}) });
+    request.finish(200);
+    const [record] = tracker.snapshot().recent;
+    assert.equal(record.state, "completed");
+    assert.equal(record.terminalEvent, undefined);
+    assert.equal(record.terminalStatus, undefined);
+  }
+});
+
+test("a new attempt clears an embedded unsuccessful status", () => {
+  const tracker = createRequestProgress();
+  const request = tracker.begin();
+  request.attempt();
+  request.event({ type: "response.completed", response: { status: "incomplete" } });
+  request.attempt();
+  request.event({ type: "response.completed", response: { status: "completed" } });
+  request.finish(200);
+  const [record] = tracker.snapshot().recent;
+  assert.equal(record.state, "completed");
+  assert.equal(record.terminalStatus, undefined);
+});
+
 test("a successful new attempt replaces an unsuccessful earlier terminal", () => {
   const tracker = createRequestProgress();
   const request = tracker.begin();

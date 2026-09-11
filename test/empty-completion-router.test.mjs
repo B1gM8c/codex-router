@@ -1551,6 +1551,111 @@ test("a genuinely stalled Grok stream respects the separate bound without replay
   }
 });
 
+test("a silent Grok stream relays heartbeats that no other provider receives", async () => {
+  const prologue = [
+    "event: response.created",
+    'data: {"type":"response.created","response":{"id":"resp_heartbeat","object":"response","created_at":1700000000,"status":"in_progress","output":[]}}',
+    "",
+    "",
+  ].join("\n") + REASONING_DELTA_SSE;
+  for (const model of [GROK_OAUTH_MODEL, "deepseek/deepseek-v4-pro"]) {
+    let posts = 0;
+    const gw = await gateway((_request, response) => {
+      posts += 1;
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write(prologue);
+      const timer = setTimeout(() => response.end(CONTENT_SSE), 1_000);
+      response.once("close", () => clearTimeout(timer));
+    });
+    const routerPort = await openPort();
+    const router = run({
+      ...routerEnv(gw.port, routerPort),
+      CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_MS: "5000",
+      CODEX_ROUTER_GROK_HEARTBEAT_MS: "200",
+    });
+    try {
+      await waitFor(`${callerBaseUrl(routerPort, CALLER_KEY)}/models`, router);
+      const result = await readRouted(routerPort, { ...TURN_BODY, model });
+      assert.equal(result.status, 200, `${model}: ${result.body}`);
+      assert.match(result.body, /Recovered/, model);
+      assert.equal(posts, 1, model);
+      const beats = result.body
+        .split(/\r?\n\r?\n/)
+        .filter((block) => /^event: response\.in_progress$/m.test(block) && block.includes('"resp_heartbeat"'));
+      if (model === GROK_OAUTH_MODEL) {
+        assert.ok(beats.length >= 2, `expected heartbeats during the silence:\n${result.body}`);
+        for (const block of beats) {
+          const data = JSON.parse(block.slice(block.indexOf("data: ") + 6));
+          assert.deepEqual(Object.keys(data).sort(), ["response", "type"]);
+          assert.equal(data.response.status, "in_progress");
+        }
+      } else {
+        assert.equal(beats.length, 0, `${model} must not receive Grok heartbeats`);
+      }
+      const [event] = await waitForUsageEvents(router.stateDir, 1, router);
+      assert.equal(event.status, 200, model);
+    } finally {
+      await stopChild(router);
+      await closeServer(gw.server);
+    }
+  }
+});
+
+test("a Grok gateway error before content reaches the client at once and only once", { timeout: 30_000 }, async () => {
+  let held;
+  const gw = await gateway((_request, response) => {
+    held = response;
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    // The gateway states the failure and then keeps its stream open.
+    response.write(GROK_GATEWAY_ERROR_SSE);
+  });
+  const routerPort = await openPort();
+  const router = run({
+    ...routerEnv(gw.port, routerPort),
+    CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_MS: "1500",
+    CODEX_ROUTER_GROK_STREAM_STALL_MS: "2500",
+  });
+  let request;
+  try {
+    await waitFor(`${callerBaseUrl(routerPort, CALLER_KEY)}/models`, router);
+    const base = new URL(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`);
+    const started = Date.now();
+    let body = "";
+    let firstErrorAt;
+    request = http.request(
+      {
+        host: "127.0.0.1",
+        port: routerPort,
+        path: base.pathname,
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer codex-caller-auth" },
+      },
+      (response) => {
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+          if (firstErrorAt === undefined && /event: error/.test(body)) firstErrorAt = Date.now() - started;
+        });
+        response.on("error", () => {});
+      },
+    );
+    request.on("error", () => {});
+    request.end(JSON.stringify({ ...TURN_BODY, model: GROK_OAUTH_MODEL }));
+    // Outlast the prelude plus the Grok stall bound while the gateway holds
+    // its stream open after the failure.
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    assert.ok(firstErrorAt !== undefined, `no error reached the client: ${body}`);
+    assert.ok(firstErrorAt < 1_000, `the error was held for ${firstErrorAt}ms`);
+    assert.equal(body.match(/event: error/g).length, 1, body);
+    assert.doesNotMatch(body, /precontent_limit|list index out of range/);
+  } finally {
+    request?.destroy();
+    held?.end();
+    await stopChild(router);
+    await closeServer(gw.server);
+  }
+});
+
 test("a Grok idle past the 30-second prelude still completes", { timeout: 90_000 }, async () => {
   let posts = 0;
   const gw = await gateway(delayedAfterReasoning(CONTENT_SSE, 35_000, () => {

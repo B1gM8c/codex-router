@@ -154,6 +154,16 @@ test("extracts reasoning tokens from output_tokens_details when present", () => 
   );
 });
 
+test("a one-sided merge of two attempts drops the reporting attempt's service tier", () => {
+  for (const [first, second] of [
+    [undefined, { inputTokens: 1, outputTokens: 2, totalTokens: 3, serviceTier: "priority" }],
+    [{ inputTokens: 1, outputTokens: 2, totalTokens: 3, serviceTierUnknown: true }, undefined],
+  ]) {
+    assert.deepEqual(mergeTokenUsage(first, second), { inputTokens: 1, outputTokens: 2, totalTokens: 3 });
+  }
+  assert.equal(mergeTokenUsage(undefined, undefined), undefined);
+});
+
 test("adds up the usage of two attempts at one turn", () => {
   assert.deepEqual(
     mergeTokenUsage(

@@ -63,6 +63,7 @@ import {
   zaiResponsesCompatTransform,
 } from "./zai-responses-compat.mjs";
 import { grokReasoningSummaryCompatTransform } from "./grok-reasoning-summary-compat.mjs";
+import { ResponsesHeartbeatTransform } from "./responses-heartbeat.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
 import {
@@ -178,6 +179,7 @@ import { recordUsageEvent } from "./usage-events.mjs";
 import { createRequestProgress } from "./request-progress.mjs";
 import {
   grokOauth46IngressContextBytes,
+  knownServiceTier,
   usageDiagnosticMetadata,
 } from "./request-diagnostics.mjs";
 import {
@@ -211,8 +213,10 @@ import {
 } from "./codex-native-session.mjs";
 import {
   installStableFetchTransport,
+  longIdleStreamFetch,
   loopbackProbeFetch,
 } from "./fetch-transport.mjs";
+import { grokStreamStallMs, grokTransportIdleTimeoutMs } from "./grok-stream-timeouts.mjs";
 import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
 
 installStableFetchTransport();
@@ -299,14 +303,47 @@ const EMPTY_COMPLETION_PRELUDE_MS =
     : 30_000;
 // Grok can pause between reasoning events for longer than the short prologue
 // budget. Bound that pause independently; never replay an already visible turn.
-const DEFAULT_GROK_STREAM_STALL_MS = 10 * 60_000;
-const configuredGrokStreamStallMs = Number(
-  process.env.CODEX_ROUTER_GROK_STREAM_STALL_MS ?? DEFAULT_GROK_STREAM_STALL_MS,
+// Every transport hop on the Grok path is sized from the same value.
+const GROK_STREAM_STALL_MS = grokStreamStallMs();
+const GROK_TRANSPORT_IDLE_TIMEOUT_MS = grokTransportIdleTimeoutMs();
+// Codex abandons a stream after five minutes without a data event and sends
+// the turn again. A silent Grok stream relays a lifecycle heartbeat well inside
+// that window; see src/responses-heartbeat.mjs.
+const configuredGrokHeartbeatMs = Number(
+  process.env.CODEX_ROUTER_GROK_HEARTBEAT_MS || 60_000,
 );
-const GROK_STREAM_STALL_MS =
-  Number.isFinite(configuredGrokStreamStallMs) && configuredGrokStreamStallMs > 0
-    ? configuredGrokStreamStallMs
-    : DEFAULT_GROK_STREAM_STALL_MS;
+const GROK_HEARTBEAT_MS =
+  Number.isFinite(configuredGrokHeartbeatMs) &&
+  configuredGrokHeartbeatMs > 0 &&
+  configuredGrokHeartbeatMs <= 240_000
+    ? configuredGrokHeartbeatMs
+    : 60_000;
+
+function isGrokOauthRoute(route) {
+  return Boolean(route) && canonicalProviderId(route.provider) === "grok-oauth";
+}
+
+// A Grok hop uses a pool whose body idle bound outlasts the stall guard. Every
+// other route keeps the shared pool and Undici's default bound.
+function fetchForRoute(route, url, init) {
+  return isGrokOauthRoute(route)
+    ? longIdleStreamFetch(url, init, { bodyTimeoutMs: GROK_TRANSPORT_IDLE_TIMEOUT_MS })
+    : fetch(url, init);
+}
+
+// Codex sends the service tier the operator picked, and a priority tier bills
+// at a higher rate. Only grok-oauth/grok-4.6 advertises one, so every other
+// routed body -- a failover candidate or a compaction included -- goes out
+// without it.
+function applyRoutedServiceTier(body, payload, route) {
+  delete body.service_tier;
+  if (route?.slug !== "grok-oauth/grok-4.6") return body;
+  const tier = knownServiceTier(payload.service_tier);
+  // Locked LiteLLM loses the Responses service_tier argument at its Chat
+  // bridge. extra_body reaches the forwarder without changing other routes.
+  if (tier) body.extra_body = { ...(body.extra_body || {}), service_tier: tier };
+  return body;
+}
 const configuredEmptyCompletionPreludeBytes = Number(
   process.env.CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_BYTES || 1024 * 1024,
 );
@@ -2613,6 +2650,7 @@ async function summarizeWith(
   normalizeAutoToolChoice(body, route);
   delete body.previous_response_id;
   delete body.client_metadata;
+  applyRoutedServiceTier(body, payload, route);
   // Compaction re-enters the same provider as the routed turn. Strict Chat
   // Completions surfaces reject this OpenAI search parameter even though it
   // is unrelated to the compaction body.
@@ -3320,12 +3358,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     model: route.gatewayModel,
     input: routedInput,
   };
-  // Locked LiteLLM loses the Responses service_tier argument at its Chat
-  // bridge. extra_body reaches the forwarder without changing other routes.
-  if (route.slug === "grok-oauth/grok-4.6" &&
-      (payload.service_tier === "priority" || payload.service_tier === "default")) {
-    routed.extra_body = { ...(routed.extra_body || {}), service_tier: payload.service_tier };
-  }
+  applyRoutedServiceTier(routed, payload, route);
   if (routedToolChoice !== payload.tool_choice) routed.tool_choice = routedToolChoice;
   // Codex chooses a child's model; this is where an operator gets to choose its
   // depth. Applied only to turns Codex marked as a child, so a parent
@@ -3584,8 +3617,11 @@ async function attemptModelFailover({
         logFailover(route, model, verdict.reason, status, "search-capability-changed");
         continue;
       }
+      // Name the candidate now: it may wait a long time for headers, and
+      // `/activity` must not credit that wait to the provider that failed.
+      progress?.setRoute({ provider: canonicalProviderId(model.provider), model: model.slug });
       progress?.attempt();
-      upstream = await fetch(built.target, {
+      upstream = await fetchForRoute(model, built.target, {
         method: "POST",
         headers: built.headers,
         body: built.body,
@@ -3657,9 +3693,9 @@ async function handleResponses(request, response, requestUrl) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const activity = beginRequestActivity({ request, response, controller });
-  const fetchObservedUpstream = async (...args) => {
+  const fetchObservedUpstream = async (url, init) => {
     activity.progress.attempt();
-    const upstream = await fetch(...args);
+    const upstream = await fetchForRoute(route, url, init);
     activity.progress.headers();
     return upstream;
   };
@@ -3816,6 +3852,11 @@ async function handleResponses(request, response, requestUrl) {
       namespacesFlattened = built.namespacesFlattened;
       flattenedNamespaces = built.flattenedNamespaces;
       diagnostics.grokStructuredPatch = built.grokStructuredPatch;
+      // Grok 4.6 ingress measurements describe the request sent to Grok. The
+      // serving row of another model must not inherit them.
+      diagnostics.contextBytes = grokOauth46IngressContextBytes(payload, route);
+      diagnostics.requestedServiceTier =
+        route.slug === "grok-oauth/grok-4.6" ? payload.service_tier : undefined;
       pendingInterrupts = built.pendingInterrupts;
       agedInput = built.agedInput;
       toolResultAging = built.toolResultAging;
@@ -4050,7 +4091,7 @@ async function handleResponses(request, response, requestUrl) {
         console.error(
           `[codex-router] routed transport retry 1/1 model=${route.slug} path=${requestUrl.pathname}`,
         );
-        upstream = await fetch(target, {
+        upstream = await fetchObservedUpstream(target, {
           method: "POST",
           headers,
           body: routedBody,
@@ -4110,6 +4151,13 @@ async function handleResponses(request, response, requestUrl) {
           upstream = moved.upstream;
           upstreamStatus = upstream.status;
           failedBodyText = moved.failedBodyText;
+        } else {
+          // No candidate took the turn, so the failure reported below is the
+          // original route's; undo any candidate the failover loop named.
+          activity.progress.setRoute({
+            provider: canonicalProviderId(route.provider),
+            model: route.slug,
+          });
         }
       }
     }
@@ -4269,6 +4317,14 @@ async function handleResponses(request, response, requestUrl) {
         ? itemLifecycleNormalizerTransform(contentType)
         : undefined;
       if (itemNormalizer) transforms.push(itemNormalizer);
+      // Last, so no router stage ever parses a heartbeat: while a Grok stream is
+      // silent, keep the client's idle timer from abandoning a live turn.
+      if (
+        isGrokOauthRoute(route) &&
+        String(contentType).toLowerCase().includes("text/event-stream")
+      ) {
+        transforms.push(new ResponsesHeartbeatTransform({ intervalMs: GROK_HEARTBEAT_MS }));
+      }
       return { transforms, usageObserver, guard };
     };
     const firstPipeline = createResponsePipeline(upstreamContentType);
@@ -4818,6 +4874,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
   let servingProvider = "openai";
   bindClientAbort(request, response, () => {
     clientGone = true;
+    activity.progress.cancel("client_disconnected");
     controller.abort();
   });
   try {
@@ -4957,6 +5014,19 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       },
     );
     await pipeResponse(upstream, response, HOP_BY_HOP_HEADERS);
+    // pipeResponse returns normally when the client leaves mid-stream; that
+    // is a canceled request, not the upstream's status.
+    if (clientGone) {
+      recordObservedUsage({
+        model: requestedModel,
+        provider: "openai",
+        status: 0,
+        durationMs: Date.now() - startedAt,
+        retries: upstreamRetries,
+      }, diagnostics);
+      activity.finish(0);
+      return;
+    }
     recordObservedUsage({
       model: requestedModel,
       provider: "openai",
@@ -5055,6 +5125,7 @@ async function handleEmbeddings(request, response, requestUrl) {
   let status = 0;
   bindClientAbort(request, response, () => {
     clientGone = true;
+    activity.progress.cancel("client_disconnected");
     controller.abort();
   });
   try {

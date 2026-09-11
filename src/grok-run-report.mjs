@@ -139,7 +139,12 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
   const usageIds = new Set(usage.map((row) => row.requestId));
   const routerCountsComplete = settled.length > 0 && usageIds.size === settled.length &&
     settled.every((row) => usageIds.has(row.requestId)) && usage.every((row) => count(row.outputTokens) !== undefined);
-  const counts = cli ? cliUsage : routerCountsComplete ? usage : nativeCounts.length ? nativeCounts : usage;
+  // A collapsed progress-only retry keeps the selected attempt in the ordinary
+  // fields and the spend of both attempts in the billed fields.
+  const billedUsage = usage.map((row) => ({ ...row,
+    inputTokens: count(row.billedInputTokens) ?? row.inputTokens,
+    outputTokens: count(row.billedOutputTokens) ?? row.outputTokens }));
+  const counts = cli ? cliUsage : routerCountsComplete ? billedUsage : nativeCounts.length ? nativeCounts : billedUsage;
   const tokens = Object.fromEntries(['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'].map((key) => [key, total(counts, key)]));
   const durations = cli ? cliRequests.map((row) => count(row.model_elapsed_ms)).filter((v) => v !== undefined)
     : settled.map((row) => row.endedAt - row.startedAt).filter((v) => v >= 0);

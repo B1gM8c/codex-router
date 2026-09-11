@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { protectPrivateFile } from "./file-security.mjs";
+import { grokGatewayStreamTimeoutSeconds } from "./grok-stream-timeouts.mjs";
 import { LITELLM_CONFIG_PATH } from "./paths.mjs";
 import { MODELS, providerForModel } from "./model-registry.mjs";
 import { assertStateOwnership } from "./state-owner.mjs";
@@ -63,6 +64,12 @@ export function renderLiteLlmConfig() {
       `      api_base: ${yamlString(`os.environ/${apiBaseEnv}`)}`,
       '      api_key: "os.environ/CODEX_ROUTER_INTERNAL_KEY"',
       ...(responsesSurface ? [] : ["      use_chat_completions_api: true"]),
+      // A Grok OAuth turn can be silent for minutes while it reasons, so its
+      // stream timeout outlasts the router's stall guard. Every other
+      // deployment keeps the global request_timeout below.
+      ...(model.provider === "grok-oauth"
+        ? [`      stream_timeout: ${grokGatewayStreamTimeoutSeconds()}`]
+        : []),
       "",
     );
   }

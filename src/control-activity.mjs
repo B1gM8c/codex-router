@@ -47,7 +47,7 @@ export async function readControlActivity({
 function safeRecord(record) {
   const result = {};
   if (!record || typeof record !== "object") return result;
-  for (const key of ["requestId", "state", "phase", "provider", "model", "threadId", "parentThreadId", "sessionId", "agentName", "cancelReason", "terminalEvent", "observationPoint"]) {
+  for (const key of ["requestId", "state", "phase", "provider", "model", "threadId", "parentThreadId", "sessionId", "agentName", "cancelReason", "terminalEvent", "terminalStatus", "observationPoint"]) {
     if (typeof record[key] === "string" && record[key].length <= 160) result[key] = record[key];
   }
   for (const key of ["startedAt", "endedAt", "status", "upstreamAttempts", "receivedBytes", "receivedEvents", "lastHeadersAt", "lastEventAt", "lastByteAt", "cancelRequestedAt"]) {

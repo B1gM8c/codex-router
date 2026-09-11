@@ -55,8 +55,12 @@ function line(value) {
 
 function path(value) {
   line(value);
-  // Native headers trim paths. Refuse inputs whose literal path would change.
-  if (!value || value.trim() !== value) reject("nonliteral_path");
+  // Native headers trim paths, and Rust's trim also removes Unicode white space
+  // (such as U+0085) that JavaScript's leaves. Refuse inputs whose literal path
+  // would change under either.
+  if (!value || value.trim() !== value || /^\p{White_Space}|\p{White_Space}$/u.test(value)) {
+    reject("nonliteral_path");
+  }
   return value;
 }
 

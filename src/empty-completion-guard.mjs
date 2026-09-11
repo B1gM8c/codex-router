@@ -40,6 +40,20 @@ function isTerminalEvent(eventType, dataText) {
   );
 }
 
+const FAILURE_TERMINAL_EVENT_TYPES = new Set(["error", "response.failed", "response.incomplete"]);
+
+// An upstream that states the turn failed: a typed failure event, or an
+// untyped `data:` payload whose JSON names one.
+function isFailureTerminalEvent(eventType, dataText) {
+  if (FAILURE_TERMINAL_EVENT_TYPES.has(eventType)) return true;
+  if (eventType !== undefined || !dataText || dataText === "[DONE]") return false;
+  try {
+    return FAILURE_TERMINAL_EVENT_TYPES.has(JSON.parse(dataText)?.type);
+  } catch {
+    return false;
+  }
+}
+
 function sseFields(block) {
   let eventType = undefined;
   const dataLines = [];
@@ -607,6 +621,18 @@ export class EmptyCompletionGuard extends Transform {
       this.#sawContent = true;
       this.#clearTimer();
       this.#release();
+      return;
+    }
+    // A failure terminal is the upstream's own verdict, not an empty
+    // completion. Holding it would only delay the error the client needs
+    // (until the prelude or stall timer, which then reports a second failure),
+    // and retrying it would replay a request the provider already refused.
+    if (isFailureTerminalEvent(eventType, dataText)) {
+      this.#clearTimer();
+      this.#release();
+      // A stream already released for liveness or a time limit stops parsing
+      // and stops its stall timer too: the failure is the verdict.
+      this.#keepParsingAfterRelease = false;
       return;
     }
     if (isTerminalEvent(eventType, dataText)) {
