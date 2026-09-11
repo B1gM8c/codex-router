@@ -587,7 +587,7 @@ const TRACKED_STATE_FIXED_BYTES = 512;
 // a later terminal event may carry the complete response and therefore shares
 // the non-streaming JSON capture bound. Crossing either phase's bound releases
 // raw bytes before a commit and terminates the stream after one.
-const MAX_SSE_FRAME_BYTES = 256 * 1024;
+const MAX_SSE_FRAME_BYTES = 10 * 1024 * 1024;
 const MAX_COMMITTED_SSE_FRAME_BYTES = MAX_JSON_CAPTURE_BYTES;
 const LINE_FEED = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
