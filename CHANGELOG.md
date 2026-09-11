@@ -18,6 +18,15 @@
   `bin/control service restart`. Native slugs, native aliases, the native
   redirect, and routed slugs behave as before. `doctor` now warns about each
   skipped user model that has no route.
+- **Control Center loads Codex account usage again when both account reads
+  answer.** The conflict resolution that merged #662 onto #648 renamed the
+  shared normalizer to `partialUsage` but left the both-answered call site on
+  the removed `usageFromReplies`, so every healthy poll threw a
+  `ReferenceError` and Control Center painted "Some router data could not
+  load" over the snapshot. The test fake answered synchronously from inside
+  the probe's guarded stdin write, whose `catch` swallowed the error; it now
+  has a `deferred` mode that answers on a later tick like a real pipe, and a
+  both-answered test that fails without the fix.
 - **Routed models' turns now render like native ones in Codex.** Native models
   label each assistant message `commentary` (a progress note before more tool
   calls) or `final_answer`, and Codex folds commentary into "Worked for ..."
@@ -55,6 +64,7 @@
   history is unchanged. Tests cover continuing and compacting a conversation,
   sessions supplied by the caller or the router, and replaying normalized
   history. Based on #664 by @webhype.
+
 - **Tok/s counts reasoning tokens exactly when they were generated inside the
   timed window.** The Sep 5 change subtracted `reasoning_tokens` from the
   numerator on every route, but the first-token clock already started on the
@@ -79,6 +89,25 @@
   e.g. 150 output against 499 reasoning), so the inclusive total is rebuilt
   first instead of clamping the sample to zero and silently dropping it.
   Provider totals and billing are unchanged.
+- **Meta API routes for Muse Spark 1.3 and its Contributor tier.**
+  `meta/muse-spark-1.3` and `meta/muse-spark-1.3-contributor` mirror the Muse
+  Spark 1.2 Meta routes: 1M context compacting at 900K, text and image input,
+  the minimal-to-xhigh ladder defaulting to high, reasoning summaries, and
+  `auto-tool-choice`. Meta's model page documents both ids, the window, and
+  image input; the Contributor tier is cheaper because Meta may use its traffic
+  to improve its products.
+- **Command Code route for Muse Spark 1.3.** `commandcode/muse-spark-1.3`
+  follows `commandcode/muse-spark-1.2`: 1M context compacting at 900K, text and
+  image input, `auto-tool-choice`, and only the `high` effort, because Command
+  Code does not document effort values. Command Code also lists the
+  Contributor tier, but no Command Code Contributor route is checked in for
+  either version; it remains available through `bin/curate-models commandcode`.
+- **OpenRouter route for DeepSeek V4.1 Flash.**
+  `openrouter/deepseek-v4.1-flash` takes OpenRouter's catalog values (1,048,576
+  context, text and image input, low/high/max) and compacts at 900K to keep
+  DeepSeek's 128K max-effort completion. It carries `auto-tool-choice` because
+  DeepSeek rejects forced tool choices in thinking mode. Live verification has
+  not been run; see `docs/research/deepseek-v4-1-flash-2026-09-11.md`.
 - **Preserve tool calls after large fragmented response preludes.** Allow one
   unfinished initial event within the existing 10 MiB bound and match the
   namespace relay's limit, so later MCP calls retain their client identities.

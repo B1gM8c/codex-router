@@ -7566,6 +7566,7 @@ test("router normalizes forced tool choices before LiteLLM for auto-tool-choice 
     // router, so this must already be auto when it reaches the gateway.
     for (const [slug, gatewayModel] of [
       ["opencode-go/deepseek-v4.1-flash", "opencode-go-deepseek-v4-1-flash"],
+      ["openrouter/deepseek-v4.1-flash", "openrouter-deepseek-v4-1-flash"],
       ["ollama-cloud/minimax-m3", "ollama-cloud-minimax-m3"],
       ["commandcode/muse-spark-1.2", "commandcode-muse-spark-1-2"],
       [

@@ -56,6 +56,32 @@ https://github.com/anomalyco/opencode/pull/48363.
 Route: `opencode-go/deepseek-v4.1-flash` with `auto-tool-choice`, window
 1,000,000 compacting at 850,000.
 
+## OpenRouter (`openrouter`)
+
+Sources: https://openrouter.ai/api/v1/models,
+https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash/endpoints
+(both public, read 2026-09-11).
+
+- Lists `deepseek/deepseek-v4.1-flash` (canonical
+  `deepseek/deepseek-v4.1-flash-20260910`), created 2026-09-10.
+- `context_length` 1,048,576; `top_provider` output 384,000; text+image input;
+  efforts max/high/low, default high; supports `tools`, `tool_choice`,
+  `reasoning_effort`.
+- Eleven hosts serve it, DeepSeek among them. Most serve the full 1,048,576
+  window with 131,072 to 943,718 output; Io Net caps context at 262,144 and
+  SiliconFlow does not list `tools`. The router sets no OpenRouter provider
+  preferences, so it does not choose which host answers.
+- DeepSeek's endpoint rejects `required` and named tool choices in thinking
+  mode, so the route carries `auto-tool-choice`, as the opencode Go route does.
+- Not verified: whether OpenRouter returns prior `reasoning_content` to
+  DeepSeek on tool-bearing turns. As on the opencode Go, Nous and Command Code
+  routes, the router's own replay (`usesNativeChatReasoning` in
+  `src/chat-reasoning.mjs`) does not apply here.
+
+Route: `openrouter/deepseek-v4.1-flash` with `auto-tool-choice`, window
+1,048,576 compacting at 900,000, which keeps DeepSeek's 128K max-effort
+completion and every listed host's output limit below the window.
+
 ## Nous Research Portal (`nousresearch`)
 
 Source: https://inference-api.nousresearch.com/v1/models (public).

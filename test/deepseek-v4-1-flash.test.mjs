@@ -74,6 +74,25 @@ test("DeepSeek V4.1 Flash on Command Code uses the Provider API chat route", () 
   assert.equal(curatedModelBlockReason("commandcode", "deepseek/deepseek-v4.1-flash"), undefined);
 });
 
+test("DeepSeek V4.1 Flash on OpenRouter takes the catalog window and DeepSeek's tool-choice limit", () => {
+  const model = MODEL_BY_SLUG.get("openrouter/deepseek-v4.1-flash");
+  assert.ok(model);
+  assert.equal(model.provider, "openrouter");
+  assert.equal(model.upstreamModel, "deepseek/deepseek-v4.1-flash");
+  assert.equal(model.listed, true);
+  // DeepSeek answers 400 to a forced tool choice in thinking mode, and its
+  // endpoint is one of the hosts OpenRouter may pick for any request.
+  assert.equal(model.requestProfile, "auto-tool-choice");
+  assert.deepEqual(model.reasoningLevels.map(({ effort }) => effort), ["low", "high", "max"]);
+  assert.equal(model.contextWindow, 1_048_576);
+  assert.equal(model.autoCompact, 900_000);
+  assert.ok(model.contextWindow - model.autoCompact >= MAX_EFFORT_DEFAULT_OUTPUT);
+  assert.deepEqual(model.inputModalities, ["text", "image"]);
+  assert.notEqual(model.multiAgentVersion, "v2");
+  // A reseller route sits in its provider's band, not beside the direct API.
+  assert.ok(model.priority > MODEL_BY_SLUG.get("deepseek/deepseek-v4.1-flash").priority);
+});
+
 test("V4.1 Flash is added alongside the V4 routes rather than replacing them", () => {
   for (const [slug, upstreamModel] of [
     ["deepseek/deepseek-v4-flash", "deepseek-v4-flash"],
