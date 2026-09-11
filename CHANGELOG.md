@@ -14,7 +14,60 @@
   2026-09-14 04:00 UTC `deepseek-v4-pro` requests are served by V4.1 Flash too.
   Ollama Cloud and ClinePass do not offer V4.1 Flash yet. Evidence is in
   `docs/research/deepseek-v4-1-flash-2026-09-11.md`.
-
+- **Routed workers expose read-only request progress.** `bin/control activity
+  [thread-id]` reports active requests and bounded recent outcomes behind the
+  caller capability, including observed stream events and cancellation causes.
+  Quiet polling never ends a request, and the shipped agent guidance separates
+  polling intervals from worker deadlines.
+- **Grok repairs require a successful response terminal.** Failed, incomplete,
+  and truncated streams return a terminal error without releasing withheld
+  client actions or private final answers. Reasoning remains live.
+- **Grok gateway stream errors reach Codex as terminal failures.** Untyped
+  gateway errors are normalized without exposing upstream diagnostics or
+  appending empty message closes, and request activity records the failure.
+- **Grok OAuth streams survive long reasoning pauses end to end.** After the
+  prologue is released, a Grok OAuth turn uses a ten-minute stall bound
+  (`CODEX_ROUTER_GROK_STREAM_STALL_MS`, positive milliseconds; invalid or
+  timer-unsafe values keep the default) instead of the 30-second prelude. Every
+  hop on that path now outlasts the bound: the router's gateway pool and the
+  forwarder's xAI pool used to end a silent stream after five minutes with
+  `UND_ERR_BODY_TIMEOUT`, and the gateway after ten. While the stream is silent
+  the router also relays a `response.in_progress` heartbeat
+  (`CODEX_ROUTER_GROK_HEARTBEAT_MS`, default one minute), because Codex abandons
+  a stream after five minutes without a data event and sends the whole turn
+  again, billing it a second time. Other providers keep their existing bounds
+  and receive no heartbeat. Visible streams are never replayed.
+- **A failure an upstream states before any content reaches the client at once.**
+  The empty-completion guard held a pre-content `error`, `response.failed`, or
+  `response.incomplete` until its prelude limit and then reported a second,
+  invented failure. It now releases the upstream's own verdict immediately and
+  never retries it. On the WebSocket edge, a stream that stays open after a
+  failure is drained for at most five seconds, so the client's next request on
+  that socket is not queued behind it.
+- **A Grok attempt is sealed by its first terminal event.** A tool call, text, or
+  second terminal arriving after `response.completed` can no longer add a client
+  action or change the outcome, and the forwarder stops reading there. An
+  optional progress-only retry that fails, is incomplete, or ends without a
+  terminal keeps the first, already-successful answer instead of replacing it
+  with an error. Provider-reported counts from a rejected attempt are logged.
+- **Fast is never sent where it was not offered.** A routed body keeps
+  `service_tier` only when the route serving it advertises that tier, so a
+  `priority` request on `grok-oauth/grok-4.6` no longer reaches a failover
+  candidate or a compaction for another route, while a curated model that
+  advertises a tier still receives it. A usage row covering two attempts no
+  longer carries one attempt's tier.
+- **Request activity is accurate on every path.** The routed transport retry and
+  failover candidates count as observed attempts, a candidate waiting for
+  headers is attributed to itself, and a `response.completed` carrying a failed
+  or incomplete status settles as `failed` with `terminalStatus`. Client
+  disconnects on native image/search and embeddings requests settle as
+  `canceled`; a canceled native stream used to record `completed` with status
+  200. `codex-router.ps1 activity` is the Windows entry point. Grok-only
+  diagnostics no longer follow a turn onto another provider, and run reports
+  total billed tokens for collapsed retries.
+- **Structured patch paths that a native header trim would change are refused**,
+  including trailing U+0085. The CI test job and `npm test` now fail a hung test
+  instead of holding a runner for six hours.
 - **The ChatGPT Web provider is removed: using it risked an OpenAI account
   ban.** `chatgpt-web` routed Codex turns into an unofficial browser automation
   of chatgpt.com, driven through a separately installed launcher on loopback

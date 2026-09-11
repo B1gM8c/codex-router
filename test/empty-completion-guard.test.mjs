@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   EmptyCompletionGuard,
@@ -123,6 +124,39 @@ const TOOL_CALL_TURN = [
   'data: {"type":"response.done","response":{"id":"r1"}}',
   "",
 ].join("\n");
+
+test("a failure terminal is released at once instead of being held to a limit", async () => {
+  for (const [label, prologue, failure] of [
+    ["typed error before any event", "", 'event: error\ndata: {"type":"error","error":{"message":"refused"}}\n\n'],
+    ["untyped failed response", "", 'data: {"type":"response.failed","response":{"id":"r1","status":"failed"}}\n\n'],
+    [
+      "error after a liveness release",
+      'event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta","delta":"x"}\n\n',
+      'event: error\ndata: {"type":"error","error":{"message":"refused"}}\n\n',
+    ],
+  ]) {
+    const guard = new EmptyCompletionGuard("text/event-stream", {
+      maxPreludeMs: 1_000,
+      maxStreamStallMs: 250,
+    });
+    const output = [];
+    const errors = [];
+    guard.on("data", (chunk) => output.push(Buffer.from(chunk).toString("utf8")));
+    guard.on("error", (error) => errors.push(error));
+    // The upstream states its failure and then keeps the socket open.
+    if (prologue) guard.write(prologue);
+    guard.write(failure);
+    await delay(60);
+    assert.equal(output.join(""), prologue + failure, `${label}: failure was held`);
+    await delay(1_100);
+    assert.deepEqual(errors, [], `${label}: a limit fired after the upstream's own verdict`);
+    assert.equal(guard.preludeLimitKind(), undefined, label);
+    guard.end();
+    await new Promise((resolve) => guard.once("end", resolve));
+    assert.equal(guard.isEmpty(), false, `${label}: a failure is not an empty completion`);
+    assert.equal(guard.suppressedPrologue(), false, label);
+  }
+});
 
 test("a turn with output text passes through untouched and is not empty", async () => {
   const { body, empty } = await runGuard(CONTENT_TURN);

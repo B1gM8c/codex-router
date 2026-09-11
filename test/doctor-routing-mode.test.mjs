@@ -157,6 +157,7 @@ wire_api = "responses"
       writeFileSync(nativeCapturePath, `${JSON.stringify(nativeCapture)}\n`, { mode: 0o600 });
 
       const doctor = child("doctor.mjs", ["--json"], env);
+      assert.ifError(doctor.error);
       const report = JSON.parse(doctor.stdout);
       const byName = new Map(report.checks.map((check) => [check.name, check]));
       assert.deepEqual(byName.get("Merged catalog"), {
@@ -278,6 +279,7 @@ test(
       assert.equal(enabled.status, 0, enabled.stderr);
 
       const doctor = child("doctor.mjs", ["--json"], env);
+      assert.ifError(doctor.error);
       const report = JSON.parse(doctor.stdout);
       const byName = new Map(report.checks.map((check) => [check.name, check]));
       assert.deepEqual(byName.get("Codex model catalog"), {

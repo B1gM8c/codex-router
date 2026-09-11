@@ -2005,6 +2005,33 @@ purpose.
    discount pasted image JSON, tool schemas, or unknown content shapes. The
    estimate must not mutate or upload the caller's image data.
 
+## A silent Grok stream is kept alive, never replayed
+
+Grok OAuth can reason for minutes with nothing to send, and every layer between
+xAI and Codex has its own idle limit. The router's post-prologue stall guard
+(`CODEX_ROUTER_GROK_STREAM_STALL_MS`, ten minutes) is the one meant to decide.
+
+1. **Every transport hop outlasts the guard.** `src/grok-stream-timeouts.mjs`
+   sizes the router's Grok gateway pool, the gateway's per-deployment
+   `stream_timeout`, and the forwarder's xAI pool from that one value. A new hop
+   on the Grok path takes its bound from there. The shared Undici pool keeps its
+   default for every other provider.
+2. **Codex's idle timer is fed a lifecycle event, never a comment.** Codex
+   abandons a stream after five minutes without a parsed data event and sends
+   the whole turn again, which bills the provider twice; an SSE comment or a
+   WebSocket ping does not reset that timer. `src/responses-heartbeat.mjs`
+   relays `response.in_progress` carrying only the response's id, model, and
+   creation time -- only after `response.created`, only at an event boundary,
+   never after a terminal event, and as the last pipeline stage so no router
+   transform parses it. It never carries text, reasoning, or a tool item: the
+   rule against router-authored transcript content stands.
+3. **Only Grok OAuth routes get either.** Other providers keep their stall bound
+   and receive no heartbeat. Widening either needs the same proof: a router test
+   that a silent stream survives, and one that another route is unchanged.
+4. Coverage lives in `test/grok-stream-timeouts.test.mjs`,
+   `test/responses-heartbeat.test.mjs`, `test/fetch-transport.test.mjs`, and the
+   Grok cases in `test/empty-completion-router.test.mjs`.
+
 ## Routed subagent regression prevention
 
 - A normal `/responses` smoke test does not cover Codex collaboration. Current

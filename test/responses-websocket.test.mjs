@@ -1213,6 +1213,29 @@ test("drops oversized continuation state so Codex retries the full request", asy
   peer.close();
 });
 
+test("streamed errors carry an HTTP failure status so native WebSocket clients terminate the turn", async (t) => {
+  const statuses = [undefined, 429, 503, "502", 200];
+  let calls = 0;
+  const { server, port } = await startServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    const status = statuses[calls++];
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ type: "error", ...(status === undefined ? {} : { status }), error: { type: "local_router_stream_failed", message: "fixture stream interrupted" } })}\n\n`);
+  });
+  t.after(() => server.close());
+  const { peer } = await connect(port);
+  t.after(() => peer.socket.destroy());
+  for (const status of statuses) {
+    peer.sendJson(createRequest());
+    const error = await peer.nextJson();
+    assert.equal(error.type, "error");
+    assert.equal(error.status, Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502);
+    assert.deepEqual(error.error, { type: "local_router_stream_failed", message: "fixture stream interrupted" });
+  }
+  assert.equal(calls, statuses.length, "the bridge must not replay failed requests");
+  peer.close();
+});
+
 test("turns malformed internal SSE into a bounded WebSocket error", async (t) => {
   const { server, port } = await startServer(async (request, response) => {
     for await (const _chunk of request) {}

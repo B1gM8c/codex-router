@@ -149,6 +149,25 @@ test("normalizes Responses and Chat Completions token usage", () => {
   );
 });
 
+test("Grok tier metering uses measured bridge metadata and keeps absence honest", () => {
+  const observe = payload => tokenUsageFromPayload(payload, { grokServiceTier: true });
+  const response = { usage: { input_tokens: 8, output_tokens: 2 }, service_tier: "priority" };
+  assert.equal(observe(response).serviceTier, undefined);
+  response.provider_specific_fields = { grok_service_tier: "default" };
+  assert.equal(observe({ type: "response.completed", response }).serviceTier, "default");
+  assert.equal(tokenUsageFromPayload(response).serviceTier, undefined, "other routes do not interpret Grok metadata");
+  response.provider_specific_fields.grok_service_tier = "unknown";
+  assert.equal(observe(response).serviceTierUnknown, true);
+  response.provider_specific_fields.grok_service_tier = "user text must not be copied";
+  assert.equal(observe(response).serviceTier, undefined);
+  assert.equal(JSON.stringify(observe(response)).includes("user text"), false);
+  const merged = mergeTokenUsage(
+    { inputTokens: 8, outputTokens: 2, totalTokens: 10, serviceTier: "default" },
+    { inputTokens: 8, outputTokens: 2, totalTokens: 10, serviceTier: "priority" },
+  );
+  assert.equal(merged.serviceTier, undefined);
+});
+
 test("captures provider-reported prefix-cache hits when they exist", () => {
   // OpenAI-compatible shape: cached prefix inside input_tokens_details.
   assert.deepEqual(
@@ -209,6 +228,34 @@ test("extracts reasoning tokens from output_tokens_details when present", () => 
     normalizeTokenUsage({ input_tokens: 10, output_tokens: 5 }),
     { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
   );
+  // An explicit zero is a measured zero and must survive.
+  assert.deepEqual(
+    normalizeTokenUsage({
+      input_tokens: 10,
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 0 },
+    }),
+    { inputTokens: 10, outputTokens: 5, totalTokens: 15, reasoningTokens: 0 },
+  );
+  // null/string are not source-provided counts; they stay absent.
+  assert.deepEqual(
+    normalizeTokenUsage({
+      input_tokens: 10,
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: null },
+    }),
+    { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+  );
+});
+
+test("a one-sided merge of two attempts drops the reporting attempt's service tier", () => {
+  for (const [first, second] of [
+    [undefined, { inputTokens: 1, outputTokens: 2, totalTokens: 3, serviceTier: "priority" }],
+    [{ inputTokens: 1, outputTokens: 2, totalTokens: 3, serviceTierUnknown: true }, undefined],
+  ]) {
+    assert.deepEqual(mergeTokenUsage(first, second), { inputTokens: 1, outputTokens: 2, totalTokens: 3 });
+  }
+  assert.equal(mergeTokenUsage(undefined, undefined), undefined);
 });
 
 test("adds up the usage of two attempts at one turn", () => {
@@ -235,6 +282,13 @@ test("adds up the usage of two attempts at one turn", () => {
       { inputTokens: 50, outputTokens: 100, totalTokens: 150, reasoningTokens: 30 },
     ),
     { inputTokens: 100, outputTokens: 200, totalTokens: 300, reasoningTokens: 50 },
+  );
+  assert.deepEqual(
+    mergeTokenUsage(
+      { inputTokens: 10, outputTokens: 2, totalTokens: 12, reasoningTokens: 0 },
+      { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+    ),
+    { inputTokens: 20, outputTokens: 4, totalTokens: 24, reasoningTokens: 0 },
   );
   // One-sided merges are the ordinary case: an attempt whose provider reported
   // nothing must not erase the one that did.
@@ -273,6 +327,77 @@ test("detects first token from chat.completion.chunk without type field", async 
   await passThrough(transform, body);
   // First token should be detected from the first delta with content.
   assert.equal(typeof transform.firstTokenAt(), "number");
+});
+
+test("stream, JSON, and headerless readers preserve reasoning absent vs zero", async () => {
+  const withReasoning = {
+    input_tokens: 21,
+    output_tokens: 8,
+    output_tokens_details: { reasoning_tokens: 5 },
+  };
+  const zeroReasoning = {
+    input_tokens: 21,
+    output_tokens: 8,
+    output_tokens_details: { reasoning_tokens: 0 },
+  };
+  const absentReasoning = { input_tokens: 21, output_tokens: 8 };
+
+  const sse = (usage) => [
+    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    `event: response.completed\ndata: ${JSON.stringify({
+      type: "response.completed",
+      response: { usage },
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ];
+
+  const stream = new ResponseUsageTransform("text/event-stream");
+  assert.equal(await passThrough(stream, sse(withReasoning)), sse(withReasoning).join(""));
+  assert.deepEqual(stream.tokenUsage(), {
+    inputTokens: 21,
+    outputTokens: 8,
+    totalTokens: 29,
+    reasoningTokens: 5,
+  });
+
+  const streamZero = new ResponseUsageTransform("text/event-stream");
+  await passThrough(streamZero, sse(zeroReasoning));
+  assert.equal(streamZero.tokenUsage().reasoningTokens, 0);
+
+  const streamAbsent = new ResponseUsageTransform("text/event-stream");
+  await passThrough(streamAbsent, sse(absentReasoning));
+  assert.equal("reasoningTokens" in streamAbsent.tokenUsage(), false);
+
+  const jsonBody = JSON.stringify({ usage: withReasoning });
+  const json = new ResponseUsageTransform("application/json");
+  assert.equal(await passThrough(json, [jsonBody]), jsonBody);
+  assert.equal(json.tokenUsage().reasoningTokens, 5);
+
+  const jsonZero = new ResponseUsageTransform("application/json");
+  await passThrough(jsonZero, [JSON.stringify({ usage: zeroReasoning })]);
+  assert.equal(jsonZero.tokenUsage().reasoningTokens, 0);
+
+  const jsonAbsent = new ResponseUsageTransform("application/json");
+  await passThrough(jsonAbsent, [JSON.stringify({ usage: absentReasoning })]);
+  assert.equal("reasoningTokens" in jsonAbsent.tokenUsage(), false);
+
+  const headerless = new ResponseUsageTransform("");
+  await passThrough(headerless, sse(withReasoning).map((part) => Buffer.from(part, "utf8")));
+  assert.equal(headerless.tokenUsage().reasoningTokens, 5);
+
+  const headerlessZero = new ResponseUsageTransform("");
+  await passThrough(
+    headerlessZero,
+    sse(zeroReasoning).map((part) => Buffer.from(part, "utf8")),
+  );
+  assert.equal(headerlessZero.tokenUsage().reasoningTokens, 0);
+
+  const headerlessAbsent = new ResponseUsageTransform("");
+  await passThrough(
+    headerlessAbsent,
+    sse(absentReasoning).map((part) => Buffer.from(part, "utf8")),
+  );
+  assert.equal("reasoningTokens" in headerlessAbsent.tokenUsage(), false);
 });
 
 test("captures JSON usage without changing the response", async () => {
@@ -875,4 +1000,18 @@ test("a ciphertext value carrying escapes ends where JSON says it ends", () => {
       `escape ${JSON.stringify(awkward)} moved the estimate`,
     );
   }
+});
+
+test("Grok tier-only terminal metadata preserves earlier measured token counters", async () => {
+  const events = [
+    { type: "response.in_progress", response: { usage: { input_tokens: 11, output_tokens: 7 } } },
+    { type: "response.completed", response: { provider_specific_fields: { grok_service_tier: "priority" } } },
+  ];
+  const body = events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("");
+  const transform = new ResponseUsageTransform("text/event-stream", { grokServiceTier: true });
+  assert.equal(await passThrough(transform, [body]), body);
+  assert.equal(transform.tokenUsage().inputTokens, 11);
+  assert.equal(transform.tokenUsage().outputTokens, 7);
+  assert.equal(transform.tokenUsage().totalTokens, 18);
+  assert.equal(transform.tokenUsage().serviceTier, "priority");
 });
