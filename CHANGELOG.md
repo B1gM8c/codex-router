@@ -30,6 +30,10 @@
   latest coding-optimized agentic model with 1M-token context, minimal-to-xhigh
   reasoning ladder, and image support through the Responses API. New routes:
   `meta/muse-spark-1.3` and `meta/muse-spark-1.3-contributor`.
+- **Command Code routes for Muse Spark 1.3 and Muse Spark 1.3 Contributor.**
+  Command Code Provider API now serves `meta/muse-spark-1.3` and
+  `meta/muse-spark-1.3-contributor` with 1M context. New routes:
+  `commandcode/muse-spark-1.3` and `commandcode/muse-spark-1.3-contributor`.
 - **OpenRouter route for DeepSeek V4.1 Flash.** OpenRouter has served
   `deepseek/deepseek-v4.1-flash` since 2026-09-10 with 1M context and image
   support. New route: `openrouter/deepseek-v4.1-flash`.
@@ -40,9 +44,9 @@
   Comprehensive live provider catalog research across all wired providers
   (OpenRouter, Nous Research, OpenCode Go/Free, Command Code, Z.ai, Ollama Cloud,
   Venice, DeepSeek API, Meta API) documented in
-  `docs/research/model-family-audit-2026-09-11.md`. Three missing pins identified
-  and added: Meta Muse Spark 1.3 routes, OpenRouter DeepSeek V4.1 Flash, and
-  Nous Research GLM-5.3-Flash.
+  `docs/research/model-family-audit-2026-09-11.md`. Five missing pins identified
+  and added: Meta Muse Spark 1.3 routes, Command Code Muse Spark 1.3 routes,
+  OpenRouter DeepSeek V4.1 Flash, and Nous Research GLM-5.3-Flash.
 - **Preserve tool calls after large fragmented response preludes.** Allow one
   unfinished initial event within the existing 10 MiB bound and match the
   namespace relay's limit, so later MCP calls retain their client identities.

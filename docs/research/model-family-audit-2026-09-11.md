@@ -171,10 +171,14 @@ From research note:
 
 ### Command Code (commandcode)
 
-From research note + config inspection:
+Live Command Code Provider API catalog (`https://api.commandcode.ai/provider/v1/models`) lists:
 - `deepseek/deepseek-v4.1-flash` added in CLI v1.53.0 ✅
+- `meta/muse-spark-1.3` — 1,048,576 context ✅ **NOW CURATED**
+- `meta/muse-spark-1.3-contributor` — 1,048,576 context ✅ **NOW CURATED**
+- `meta/muse-spark-1.2` and `meta/muse-spark-1.2-contributor` also present
 - GLM 5.3 and 5.3 Flash routes exist ✅
-- No Muse Spark 1.3 routes (Command Code doesn't offer Meta models)
+
+**Repository Status:** Command Code Muse Spark 1.3 pins were missing but are now added.
 
 ### Z.ai API and Coding Plan
 
@@ -263,18 +267,21 @@ All curated routes match live provider catalogs or documented retirement (e.g., 
 
 ## Known Limitations
 
-1. **No authenticated catalog queries** — Could not verify Command Code, ClinePass, Qwen Plan, or other API-key-only providers live
+1. **Incomplete live verification** — Could not verify all API-key providers (ClinePass, Qwen Plan) or Venice (HTTP 402 on free account) against live endpoints at the time of initial audit
 2. **models.dev freshness** — OpenCode's models.dev may lag behind Go subscription catalog by hours
-3. **Venice** — Could not verify Venice catalog live (HTTP 402 billing gate on free account)
-4. **Native Responses confinement** — Only DeepSeek API uses native Responses path (per AGENTS.md constraint)
+3. **Native Responses confinement** — Only DeepSeek API uses native Responses path (per AGENTS.md constraint)
+4. **Command Code confirmation** — Command Code Muse Spark 1.3 routes added post-audit based on live catalog verification at `https://api.commandcode.ai/provider/v1/models`
 
 ## Recommendations
 
 1. ✅ **Add Meta Muse Spark 1.3 routes** — Meta is the canonical provider and should have the latest model
-2. ✅ **Keep all existing routes** — No stale pins detected; all routes either live or documented as legacy-but-working
-3. ✅ **Maintain conservative GLM Flash compaction** — 400K threshold is proven safe per existing research
-4. ⚠️ **Monitor DeepSeek V4 Pro remap** — Research note mentions V4 Pro requests served by Flash from 2026-09-14; routes should reflect this once it takes effect
-5. ✅ **Document OpenCode Free** — Free routes correctly distinguish from paid (separate provider, isFree flag, tier in metadata)
+2. ✅ **Add Command Code Muse Spark 1.3 routes** — Command Code Provider API now lists both 1.3 and 1.3-contributor
+3. ✅ **Add OpenRouter DeepSeek V4.1 Flash** — OpenRouter has served `deepseek/deepseek-v4.1-flash` since 2026-09-10
+4. ✅ **Add Nous Research GLM-5.3-Flash** — Nous Portal lists `z-ai/glm-5.3-flash` with 1.31M context
+5. ✅ **Keep all existing routes** — No stale pins detected; all routes either live or documented as legacy-but-working
+6. ✅ **Maintain conservative GLM Flash compaction** — 400K threshold is proven safe per existing research
+7. ⚠️ **Monitor DeepSeek V4 Pro remap** — Research note mentions V4 Pro requests served by Flash from 2026-09-14; routes should reflect this once it takes effect
+8. ✅ **Document OpenCode Free** — Free routes correctly distinguish from paid (separate provider, isFree flag, tier in metadata)
 
 ## Cross-References
 
