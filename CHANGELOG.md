@@ -26,7 +26,23 @@
   e.g. 150 output against 499 reasoning), so the inclusive total is rebuilt
   first instead of clamping the sample to zero and silently dropping it.
   Provider totals and billing are unchanged.
-
+- **Meta API routes for Muse Spark 1.3 and Muse Spark 1.3 Contributor.** Meta's
+  latest coding-optimized agentic model with 1M-token context, minimal-to-xhigh
+  reasoning ladder, and image support through the Responses API. New routes:
+  `meta/muse-spark-1.3` and `meta/muse-spark-1.3-contributor`.
+- **OpenRouter route for DeepSeek V4.1 Flash.** OpenRouter has served
+  `deepseek/deepseek-v4.1-flash` since 2026-09-10 with 1M context and image
+  support. New route: `openrouter/deepseek-v4.1-flash`.
+- **Nous Research route for GLM-5.3-Flash.** Nous Research Portal lists
+  `z-ai/glm-5.3-flash` live with 1.31M context but the repo had no pin despite
+  having the non-Flash GLM-5.3 route. New route: `nousresearch/glm-5.3-flash`.
+- **Model family pin audit for DeepSeek V4.1, Muse Spark 1.3, GLM 5.3 families.**
+  Comprehensive live provider catalog research across all wired providers
+  (OpenRouter, Nous Research, OpenCode Go/Free, Command Code, Z.ai, Ollama Cloud,
+  Venice, DeepSeek API, Meta API) documented in
+  `docs/research/model-family-audit-2026-09-11.md`. Three missing pins identified
+  and added: Meta Muse Spark 1.3 routes, OpenRouter DeepSeek V4.1 Flash, and
+  Nous Research GLM-5.3-Flash.
 - **Preserve tool calls after large fragmented response preludes.** Allow one
   unfinished initial event within the existing 10 MiB bound and match the
   namespace relay's limit, so later MCP calls retain their client identities.

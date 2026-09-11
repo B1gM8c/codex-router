@@ -31,6 +31,8 @@ const MUSE_12_ROUTES = [
 ];
 
 const MUSE_13_ROUTES = [
+  ["meta/muse-spark-1.3", "muse-spark-1.3", 1_048_576, 900_000],
+  ["meta/muse-spark-1.3-contributor", "muse-spark-1.3-contributor", 1_048_576, 900_000],
   ["openrouter/muse-spark-1.3", "meta/muse-spark-1.3", 1_048_576, 943_000],
   ["openrouter/muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor", 1_048_576, 943_000],
   ["nousresearch/muse-spark-1.3", "meta/muse-spark-1.3", 1_048_576, 943_000],
