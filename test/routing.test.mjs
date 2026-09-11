@@ -5621,10 +5621,10 @@ test("API forwarder routes GLM coding-plan models with thinking enabled", async 
   }
 });
 
-test("API forwarder restores bridged GLM thinking as native reasoning_content", async () => {
+["zai-coding-glm-5-3", "deepseek-v4-flash", "commandcode-deepseek-v4-flash"].forEach((gatewayModel) => test(`API forwarder restores ${gatewayModel} thinking as native reasoning_content`, async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
-    upstreamRequests.push({ headers: request.headers, body: await bodyJson(request) });
+    upstreamRequests.push({ url: request.url, headers: request.headers, body: await bodyJson(request) });
     json(response, 200, { choices: [] });
   });
   const forwarderPort = await openPort();
@@ -5632,6 +5632,10 @@ test("API forwarder restores bridged GLM thinking as native reasoning_content", 
     CODEX_ROUTER_API_PORT: String(forwarderPort),
     ZAI_CODING_BASE_URL: `http://127.0.0.1:${upstream.port}`,
     ZAI_API_KEY: "TEST_ZAI_API_KEY",
+    DEEPSEEK_API_BASE_URL: `http://127.0.0.1:${upstream.port}/v1`,
+    DEEPSEEK_API_KEY: "TEST_DEEPSEEK_API_KEY",
+    COMMANDCODE_BASE_URL: `http://127.0.0.1:${upstream.port}/provider/v1`,
+    COMMAND_CODE_API_KEY: "TEST_COMMANDCODE_API_KEY",
     CODEX_ROUTER_QUIET: "1",
   });
 
@@ -5648,7 +5652,7 @@ test("API forwarder restores bridged GLM thinking as native reasoning_content", 
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "zai-coding-glm-5-3",
+          model: gatewayModel,
           messages: [
             { role: "user", content: "first" },
             {
@@ -5671,12 +5675,20 @@ test("API forwarder restores bridged GLM thinking as native reasoning_content", 
     const assistant = request.messages[1];
     assert.equal(assistant.reasoning_content, "reason one\nreason two");
     assert.deepEqual(assistant.content, [{ type: "text", text: "visible answer" }]);
-    assert.deepEqual(request.thinking, { type: "enabled", clear_thinking: false });
+    if (gatewayModel === "zai-coding-glm-5-3") {
+      assert.deepEqual(request.thinking, { type: "enabled", clear_thinking: false });
+    } else if (gatewayModel === "deepseek-v4-flash") {
+      assert.deepEqual(request.thinking, { type: "enabled" });
+    } else {
+      assert.equal(upstreamRequests[0].url, "/provider/v1/chat/completions");
+      assert.equal(request.thinking, undefined, "history preservation must not enable a new thinking parameter");
+      assert.equal(request.reasoning_effort, undefined);
+    }
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);
   }
-});
+}));
 
 test("API forwarder preserves Z.ai cached-token telemetry before the LiteLLM bridge", async () => {
   const upstream = await mockServer(async (request, response) => {
@@ -7735,6 +7747,82 @@ test("routed compaction resolves subagent handoffs before summarizing", async ()
   }
 });
 
+test("direct DeepSeek screenshots do not saturate the prompt-token estimate", async () => {
+  let reportedInputTokens = 0;
+  const gatewayBodies = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayBodies.push(await bodyJson(request));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\ndata: ${JSON.stringify({
+      type: "response.completed",
+      response: { id: "resp_image", usage: {
+        input_tokens: reportedInputTokens, output_tokens: 12, total_tokens: reportedInputTokens + 12,
+      } },
+    })}\n\ndata: [DONE]\n\n`);
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-image-estimate-"));
+  // The canonical name is currently a curated route; keep the checked-in
+  // legacy vision route as the fixture's capability baseline.
+  const legacy = JSON.parse(readFileSync(
+    path.join(root, "config/deepseek/deepseek-v4-flashvision-exp.json"), "utf8",
+  )).models[0];
+  const userModels = path.join(stateDir, "user-models.json");
+  writeFileSync(userModels, JSON.stringify({ version: 1, models: [{
+    ...legacy,
+    slug: "deepseek/deepseek-flash",
+    gatewayModel: "deepseek-flash",
+    upstreamModel: "deepseek-flash",
+    compHash: "deepseek-flash-image-estimate-fixture",
+  }] }));
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    MODEL_ROUTER_USER_MODELS: userModels,
+    CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+  });
+  const image_url = `data:image/png;base64,${"A".repeat(3_600_000)}`;
+  const body = JSON.stringify({
+    model: "deepseek/deepseek-flash",
+    input: [{ role: "user", content: [
+      { type: "input_text", text: "Inspect this screenshot." },
+      { type: "input_image", image_url },
+    ] }],
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const reported of [0, 4321]) {
+      reportedInputTokens = reported;
+      const response = await fetch(`${routerBase(routerPort)}/responses`, {
+        method: "POST",
+        headers: { Authorization: "Bearer CODEX_CALLER_SECRET", "Content-Type": "application/json" },
+        body,
+      });
+      assert.equal(response.status, 200);
+      const completed = JSON.parse((await response.text()).split("\n")
+        .find((line) => line.startsWith("data:") && line.includes("response.completed")).slice(5));
+      const count = completed.response.usage.input_tokens;
+      if (reported === 0) assert.ok(count >= 1024 && count < 2000, `image estimate was ${count}`);
+      else assert.equal(count, reported);
+      const events = await waitForUsageEvents(stateDir, reported === 0 ? 1 : 2, router);
+      assert.equal(events.at(-1).inputTokens, reported);
+      assert.equal(events.at(-1).estimatedInputTokens, reported === 0 ? count : undefined);
+      assert.equal(completed.response.usage.total_tokens, count + 12);
+      // Accounting must never replace the actual screenshot with a placeholder.
+      const images = gatewayBodies.at(-1).input.flatMap((item) => item.content || [])
+        .filter((part) => part.type === "input_image");
+      assert.equal(images.length, 1);
+      assert.equal(images[0].image_url, image_url);
+      assert.equal(gatewayBodies.at(-1).model, "deepseek-flash");
+    }
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 // Issue #95: opencode's Go endpoint reports `input_tokens: 0` for its DeepSeek
 // V4 models, so Codex's context counter never climbs, auto-compaction never
 // fires, and the provider eventually rejects the turn at its real limit. Codex
@@ -8987,7 +9075,7 @@ test("reasoning survives the replay onto tool-call and prose assistant turns ali
   }
 });
 
-test("GLM reasoning stays structurally separate while crossing the Responses bridge", async () => {
+["zai-coding/glm-5.3", "deepseek/deepseek-v4-flash", "commandcode/deepseek-v4-flash"].forEach((routedModel) => test(`${routedModel} reasoning stays structurally separate while crossing the Responses bridge`, async () => {
   const gatewayBodies = [];
   const gateway = await mockServer(async (request, response) => {
     gatewayBodies.push(await bodyJson(request));
@@ -9009,13 +9097,13 @@ test("GLM reasoning stays structurally separate while crossing the Responses bri
       summary: [{ type: "summary_text", text: "tool-call reasoning" }],
       content: null,
     },
+    { type: "reasoning", content: [{ type: "reasoning_text", text: "tool detail" }] },
     { type: "function_call", call_id: "glm-call", name: "lookup_number", arguments: "{}" },
     { type: "function_call_output", call_id: "glm-call", output: "323" },
     {
       type: "reasoning",
       id: "rs_glm_answer",
-      summary: [{ type: "summary_text", text: "provider-native reasoning" }],
-      content: null,
+      content: "provider-native reasoning",
     },
     {
       type: "message",
@@ -9033,14 +9121,18 @@ test("GLM reasoning stays structurally separate while crossing the Responses bri
         Authorization: "Bearer CODEX_CALLER_SECRET",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: "zai-coding/glm-5.3", stream: false, input }),
+      body: JSON.stringify({ model: routedModel, stream: false, input }),
     });
     assert.equal(response.status, 200, await response.text());
     const forwarded = gatewayBodies[0].input;
     const callIndex = forwarded.findIndex((item) => item?.type === "function_call");
     const beforeCall = forwarded[callIndex - 1];
     assert.equal(beforeCall?.role, "assistant");
-    assert.deepEqual(beforeCall.content, [{ type: "thinking", text: "tool-call reasoning" }]);
+    assert.deepEqual(beforeCall.content, [{ type: "thinking", text: "tool-call reasoning\ntool detail" }]);
+    assert.equal(forwarded.some((item) => item.type === "reasoning"), false);
+    for (const text of ["tool-call reasoning", "tool detail", "provider-native reasoning"]) {
+      assert.equal(JSON.stringify(forwarded).split(text).length - 1, 1);
+    }
 
     const assistant = forwarded.find(
       (item) =>
@@ -9058,12 +9150,40 @@ test("GLM reasoning stays structurally separate while crossing the Responses bri
       false,
       "provider reasoning leaked into visible assistant content",
     );
+
+    // #653's exact boundary: a prose answer followed by a no-tool request to
+    // repeat it. The marker is present only in the prior assistant answer.
+    const marker = "QRTZN-0731-VLKXW";
+    const followup = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: routedModel,
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: "Generate a marker. Do not call tools." },
+          { type: "reasoning", summary: [{ type: "summary_text", text: "Check the marker format." }] },
+          { type: "message", role: "assistant", content: `MARKER: ${marker}` },
+          { type: "message", role: "user", content: "Repeat your preceding marker and append ACK-2." },
+        ],
+      }),
+    });
+    assert.equal(followup.status, 200, await followup.text());
+    const replay = gatewayBodies.at(-1).input;
+    const answers = replay.filter((item) => item.role === "assistant");
+    assert.equal(answers.length, 1);
+    assert.deepEqual(answers[0].content, [
+      { type: "thinking", text: "Check the marker format." },
+      { type: "output_text", text: `MARKER: ${marker}` },
+    ]);
+    assert.equal(JSON.stringify(replay).split(marker).length - 1, 1);
+    assert.equal(replay.at(-1).role, "user");
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
     rmSync(stateDir, { recursive: true, force: true });
   }
-});
+}));
 
 // #292: the same "The `reasoning_content` in the thinking mode must be passed
 // back to the API" 400, but reached without a subagent and without a tool call

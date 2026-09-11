@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { maxImageTokensForRoute } from "../src/prompt-image-usage.mjs";
 
 import {
   estimateInputTokens,
@@ -10,6 +11,99 @@ import {
   substituteZeroInputUsage,
   tokenUsageFromPayload,
 } from "../src/response-usage.mjs";
+
+test("DeepSeek image bytes do not fill the prompt-token estimate", () => {
+  const body = JSON.stringify({
+    input: [{ role: "user", content: [
+      { type: "input_text", text: "Inspect this screenshot." },
+      { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(3_600_000)}` },
+    ] }],
+  });
+  const contextWindow = 1_048_576;
+  // The previous behavior falsely reports a full 1M-token conversation.
+  assert.equal(estimateInputTokens(body, { contextWindow }), contextWindow);
+  const estimate = estimateInputTokens(body, { contextWindow, maxTokensPerImage: 1024 });
+  assert.ok(estimate >= 1024 && estimate < 1200, `image estimate was ${estimate}`);
+});
+
+test("DeepSeek file references still contribute image tokens", () => {
+  const body = JSON.stringify({
+    input: [{ role: "user", content: [
+      { type: "input_image", file_id: "file-api-screenshot" },
+      { type: "input_image", image_url: "https://example.com/screenshot.png" },
+    ] }],
+  });
+  const estimate = estimateInputTokens(body, { maxTokensPerImage: 1024 });
+  assert.ok(estimate >= 2048 && estimate < 2200, `image reference estimate was ${estimate}`);
+});
+
+test("image token bounds apply only to the documented direct DeepSeek models", () => {
+  for (const upstreamModel of ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"]) {
+    assert.equal(maxImageTokensForRoute({ provider: "deepseek", upstreamModel }), 1024);
+    assert.equal(maxImageTokensForRoute({ provider: "opencode-go", upstreamModel }), undefined);
+    assert.equal(maxImageTokensForRoute({ provider: "custom", upstreamModel }), undefined);
+  }
+  assert.equal(maxImageTokensForRoute({ provider: "deepseek", upstreamModel: "deepseek-v4-pro" }), undefined);
+  assert.equal(maxImageTokensForRoute(), undefined);
+});
+
+test("image estimates retain visible text, unknown fields and ciphertext handling", () => {
+  const input = [
+    { type: "reasoning", encrypted_content: "x".repeat(200_000) },
+    { role: "developer", content: [
+      { type: "input_text", text: "visible ".repeat(5_000) },
+      { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(500_000)}`, extra: "z".repeat(20_000) },
+    ] },
+  ];
+  const estimate = estimateInputTokens(JSON.stringify({ input }), { maxTokensPerImage: 1024 });
+  assert.ok(estimate > 19_000 && estimate < 20_000, `visible text estimate was ${estimate}`);
+  assert.equal(estimateInputTokens(JSON.stringify({ input }), {
+    maxTokensPerImage: 1024, contextWindow: 10_000,
+  }), 10_000);
+});
+
+test("structured tool-output images count once each without rewriting the request", () => {
+  const image_url = `data:image/png;base64,${"A".repeat(50_000)}`;
+  const body = Buffer.from(JSON.stringify({ input: [
+    { type: "function_call_output", call_id: "call1", output: [{ type: "input_image", image_url }] },
+    { type: "custom_tool_call_output", call_id: "call2", output: [{ type: "input_image", image_url }] },
+  ] }));
+  const original = Buffer.from(body);
+  const estimate = estimateInputTokens(body, { maxTokensPerImage: 1024 });
+  assert.ok(estimate >= 2048 && estimate < 2300, `tool image estimate was ${estimate}`);
+  assert.deepEqual(body, original);
+});
+
+test("image discounts never erase quoted examples, tool schemas or unknown shapes", () => {
+  const image = { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(50_000)}` };
+  for (const payload of [
+    { input: [{ role: "user", content: [{ type: "input_text", text: JSON.stringify(image) }] }] },
+    { input: [{ type: "function_call_output", output: JSON.stringify(image) }] },
+    { tools: [{ example: image }], metadata: image },
+    { input: [{ type: "unknown", content: [image] }] },
+    { input: [{ role: "assistant", content: [image] }] },
+    { input: [{ role: "user", content: [{ ...image, file_id: "ambiguous" }] }] },
+  ]) {
+    const body = JSON.stringify(payload);
+    assert.equal(estimateInputTokens(body, { maxTokensPerImage: 1024 }), estimateInputTokens(body));
+  }
+});
+
+test("image estimates preserve escaped JSON byte accounting and malformed input fallback", () => {
+  // Every slash has an escape on the wire. Discount its original encoded bytes
+  // without reserializing the entire body (which would also erase indentation).
+  const body = JSON.stringify({ input: [{ role: "user", content: [
+    { type: "input_image", image_url: `data:image/png;base64,${"/".repeat(10_000)}` },
+  ] }] }, null, 2).replaceAll("/", "\\/");
+  const estimate = estimateInputTokens(body, { maxTokensPerImage: 1024 });
+  assert.ok(estimate >= 1024 && estimate < 1150, `escaped image estimate was ${estimate}`);
+  for (const invalid of [body.slice(0, -1), Buffer.concat([Buffer.from(body), Buffer.from([0xff])])]) {
+    assert.equal(estimateInputTokens(invalid, { maxTokensPerImage: 1024 }), estimateInputTokens(invalid));
+  }
+  for (const bound of [undefined, 0, -1, NaN, Infinity, "1024"]) {
+    assert.equal(estimateInputTokens(body, { maxTokensPerImage: bound }), estimateInputTokens(body));
+  }
+});
 
 async function passThrough(transform, chunks) {
   const output = [];
