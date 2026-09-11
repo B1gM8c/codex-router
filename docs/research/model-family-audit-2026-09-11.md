@@ -14,7 +14,7 @@ Supersedes and extends `deepseek-v4-1-flash-2026-09-11.md` with additional famil
 ## Executive Summary
 
 ### DeepSeek V4.1 Flash
-- **OpenRouter**: `deepseek/deepseek-v4.1-flash` ✅ LIVE (1,048,576 context)
+- **OpenRouter**: `deepseek/deepseek-v4.1-flash` ✅ ADDED (1,048,576 context) — **WAS MISSING**
 - **Nous Research**: `deepseek/deepseek-v4.1-flash` ✅ LIVE (1,048,576 context, but top_provider caps at 262,144)
 - **OpenCode Go**: `deepseek-v4.1-flash` ✅ LIVE per research note (1M context)
 - **Command Code**: `deepseek/deepseek-v4.1-flash` ✅ LIVE per research note (1M context)
@@ -23,7 +23,7 @@ Supersedes and extends `deepseek-v4-1-flash-2026-09-11.md` with additional famil
 - **ClinePass**: ❌ NOT LISTED per research note
 - **Qwen Plan**: Unknown (no credential to verify)
 
-**Status**: All known V4.1 Flash routes are correctly pinned. No additions needed.
+**Status**: OpenRouter route was missing despite being live since 2026-09-10. Now added.
 
 ### Muse Spark 1.3
 - **OpenRouter**: `meta/muse-spark-1.3` ✅ LIVE (1,048,576 context)
@@ -194,15 +194,21 @@ Config inspection + research note:
 ### 1. Add Meta API Routes for Muse Spark 1.3
 
 **Files to create:**
-- `/workspace/config/meta/muse-spark-1.3.json`
-- `/workspace/config/meta/muse-spark-1.3-contributor.json`
+- `/workspace/config/meta/muse-spark-1.3.json` ✅ ADDED
+- `/workspace/config/meta/muse-spark-1.3-contributor.json` ✅ ADDED
 
-These should mirror the structure of 1.2 routes with:
-- Updated slug, gatewayModel, upstreamModel
-- Same capabilities (1M context, image support, reasoning ladder)
-- Updated compHash
-- Appropriate priority (keep near 1.2 routes)
-- Optional: `availabilityNux` for the flagship route
+### 2. Add OpenRouter Route for DeepSeek V4.1 Flash
+
+**File to create:**
+- `/workspace/config/openrouter/deepseek-v4.1-flash.json` ✅ ADDED
+
+OpenRouter has served `deepseek/deepseek-v4.1-flash` since 2026-09-10 but the repo
+had no pin. Route follows standard OpenRouter patterns:
+- 1,048,576 context window
+- auto-compact at 943,000 (standard OpenRouter ratio)
+- Image input support
+- low/high/max reasoning ladder
+- Priority 8 (matching DeepSeek API route)
 
 ### 2. Update Tests
 

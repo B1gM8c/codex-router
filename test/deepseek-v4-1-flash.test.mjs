@@ -74,6 +74,20 @@ test("DeepSeek V4.1 Flash on Command Code uses the Provider API chat route", () 
   assert.equal(curatedModelBlockReason("commandcode", "deepseek/deepseek-v4.1-flash"), undefined);
 });
 
+test("DeepSeek V4.1 Flash on OpenRouter uses the standard OpenRouter context", () => {
+  const model = MODEL_BY_SLUG.get("openrouter/deepseek-v4.1-flash");
+  assert.ok(model);
+  assert.equal(model.provider, "openrouter");
+  assert.equal(model.upstreamModel, "deepseek/deepseek-v4.1-flash");
+  assert.equal(model.listed, true);
+  assert.deepEqual(model.reasoningLevels.map(({ effort }) => effort), ["low", "high", "max"]);
+  assert.equal(model.contextWindow, 1_048_576);
+  assert.ok(model.contextWindow - model.autoCompact >= MAX_EFFORT_DEFAULT_OUTPUT);
+  assert.equal(model.autoCompact, 920_000);
+  assert.deepEqual(model.inputModalities, ["text", "image"]);
+  assert.notEqual(model.multiAgentVersion, "v2");
+});
+
 test("V4.1 Flash is added alongside the V4 routes rather than replacing them", () => {
   for (const [slug, upstreamModel] of [
     ["deepseek/deepseek-v4-flash", "deepseek-v4-flash"],
