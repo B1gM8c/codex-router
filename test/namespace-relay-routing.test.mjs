@@ -1794,9 +1794,14 @@ test("routed tool_search history declares discovered tools and restores their ca
   }
 });
 
-test("Responses-native routes preserve pre-flattened tools and call identities", async () => {
-  for (const stream of [true, false]) {
+// Codex dispatches by the native identity whichever upstream answers, so a
+// route that forwards the flat declarations unchanged must still restore the
+// call. Without turn metadata nothing identifies an MCP tool, and the flat
+// name stays exactly as the provider returned it.
+test("Responses-native routes preserve pre-flattened tools and restore call identities", async () => {
+  for (const [stream, metadata] of [[true, true], [false, true], [true, false], [false, false]]) {
     const payload = preflattenedCommandCodeMcpPayload(stream, "meta/muse-spark-1.2");
+    if (!metadata) delete payload.client_metadata;
     const name = payload.tools[0].name;
     const prior = { type: "function_call", name, call_id: "call_prior", arguments: "{}" };
     payload.input = [
@@ -1819,13 +1824,23 @@ test("Responses-native routes preserve pre-flattened tools and call identities",
     assert.equal(result.gatewayBodies.length, 1);
     const outgoing = result.gatewayBodies[0];
     assert.equal(outgoing.model, "meta-muse-spark-1-2");
-    assert.deepEqual(outgoing.tools, payload.tools, "do not synthesize namespace declarations");
-    assert.deepEqual(outgoing.input, payload.input);
+    assert.equal(
+      JSON.stringify(outgoing.tools),
+      JSON.stringify(payload.tools),
+      "do not synthesize namespace declarations",
+    );
+    assert.equal(JSON.stringify(outgoing.input), JSON.stringify(payload.input));
     assert.equal(outgoing.tool_choice, "auto", "retain Meta's existing tool-choice policy");
     const returned = stream
       ? functionCallsFromSse(result.clientBody).get(call.call_id)
       : JSON.parse(result.clientBody).output[0];
-    assert.deepEqual(returned, call, "preserve the flat response identity");
+    assert.deepEqual(
+      returned,
+      metadata
+        ? { ...call, namespace: "mcp__apmneonsnapshotro", name: "get_monitor_snapshot" }
+        : call,
+      metadata ? "restore the identity Codex dispatches by" : "never infer from a name prefix",
+    );
   }
 });
 
